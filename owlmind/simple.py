@@ -1,4 +1,3 @@
-##
 ## OwlMind - Platform for Education and Experimentation with Hybrid Intelligent Systems
 ## simple.py :: provides simple implementations to many of the functionality asn utilities to get the framework running.
 ##
@@ -138,6 +137,3 @@ class SimpleEngine(BotEngine):
         else:
             context.response = "#### DEFAULT: There are no rules setup for this request!"
         return 
-
-
-

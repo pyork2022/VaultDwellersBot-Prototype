@@ -1,196 +1,142 @@
-##
-## OwlMind - Platform for Education and Experimentation with Hybrid Intelligent Systems
-## pipeline.py :: Pipeline for GenAI System
-## 
-##
-#  
-# Copyright (c) 2024, The Generative Intelligence Lab @ FAU
-# 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights 
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-# 
-# Documentation and Getting Started:
-#    https://github.com/genilab-fau/owlmind
-#
-# Disclaimer: 
-# Generative AI has been used extensively while developing this package.
-# 
-
 import requests
 import json
 from urllib.parse import urljoin
 import time
 
-
-class ModelRequestMaker():
+class ModelRequestMaker:
+    """
+    Abstract interface for building model requests.
+    """
 
     def url_models(self, url):
-        raise(f'!!ERROR!! url_models() must be overload')
+        raise NotImplementedError("url_models() must be implemented")
 
     def url_chat(self, url):
-        raise(f'!!ERROR!! url_chat() must be overload')
-    
-    def package(self, prompt, model, **kwargs):
-        raise(f'!!ERROR!! package() must be overload')
+        raise NotImplementedError("url_chat() must be implemented")
+
+    def package(self, model, prompt, **kwargs):
+        raise NotImplementedError("package() must be implemented")
 
     def unpackage(self, response):
-        raise(f'!!ERROR!! unpackage() must be overload')
+        raise NotImplementedError("unpackage() must be implemented")
+
 
 class OllamaRequest(ModelRequestMaker):
-    
     def url_chat(self, url):
-        return urljoin(url, '/api/generate')
-    
+        return urljoin(url, "/api/generate")
+
     def package(self, model, prompt, **kwargs):
         payload = {
-            "model": model, 
-            "prompt": prompt, 
+            "model": model,
+            "prompt": prompt,
             "stream": False,
         }
-
-        # Load kwargs into payload.options
         if kwargs:
-            payload["options"] = {key: value for key, value in kwargs.items()}
+            payload["options"] = {k: v for k, v in kwargs.items()}
         return payload
-    
+
     def unpackage(self, response):
-        return response['response'] if 'response' in response else None
+        return response.get("response", None)
 
 
 class OpenWebUIRequest(ModelRequestMaker):
     def url_chat(self, url):
-        return urljoin(url, '/api/chat/completions')
-    
+        return urljoin(url, "/api/chat/completions")
+
     def package(self, model, prompt, **kwargs):
         payload = {
-            "model": model if model else self.model, 
-            "messages": [ {"role" : "user", "content": prompt } ]
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
         }
-
-        # @NOTE: Need to find out the right syntax to load the arguments here!
-        #kwargs = {key: value for key, value in self.__dict__}
-        #if kwargs:
-        #   payload["options"] = {key: value for key, value in kwargs.items()}
+        # you can pass in OpenWebUI-specific kwargs here if needed
         return payload
-    
+
     def unpackage(self, response):
-        return response['choices'][0]['message']['content'] if 'choices' in response else None
+        choices = response.get("choices")
+        if choices and isinstance(choices, list):
+            return choices[0].get("message", {}).get("content")
+        return None
 
 
-###
-### MODEL PROVIDER
-### 
+class OpenAIRequest(ModelRequestMaker):
+    """
+    Connects directly to OpenAI's /chat/completions endpoint using requests.
+    """
 
-class ModelProvider():
+    def url_chat(self, url):
+        # expects base_url like "https://api.openai.com/v1"
+        return urljoin(url, "/chat/completions")
+
+    def package(self, model, prompt, **kwargs):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        # pass through any other OpenAI parameters (temperature, max_tokens, etc.)
+        payload.update(kwargs)
+        return payload
+
+    def unpackage(self, response):
+        choices = response.get("choices")
+        if choices and isinstance(choices, list):
+            return choices[0].get("message", {}).get("content")
+        return None
+
+
+class ModelProvider:
+    """
+    Routes requests to the configured ModelRequestMaker.
+    """
+
     def __init__(self, base_url, type=None, api_key=None, model=None):
         self.base_url = base_url
         self.api_key = api_key
-        self.type = None
         self.model = model
         self.req_maker = None
+        self.type = None
         self.delta = -1
         self.response = None
 
-
-        if type == 'ollama':
+        if type == "ollama":
             self.req_maker = OllamaRequest()
-            self.type = 'ollama'
-        elif type == 'open-webui':
+            self.type = "ollama"
+        elif type == "open-webui":
             self.req_maker = OpenWebUIRequest()
-            self.type = 'open-webui'
-        return
+            self.type = "open-webui"
+        elif type == "openai":
+            self.req_maker = OpenAIRequest()
+            self.type = "openai"
+        # else: provider remains None
 
     def _call(self, url, payload=None):
-        """
-        Issue the HTTP-Request to the Model Provider
-        """
-        headers = dict()
-        headers["Content-Type"] = "application/json"
-        if self.api_key: 
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        
+
         try:
-            start_time = time.time()
-            response = requests.post(url=url, data=payload, headers=headers)
-            delta = time.time() - start_time
-        except:
-            return -1, f"!!ERROR!! Request failed! You need to adjust .env with URL({self.base_url})"
-        
-        return delta, response
-
-
-    def models(self):
-        """
-        Issue request about Models Available
-        """
-        url = self.req_maker.url_models(base_url=self.url)
-        return self._call(url=url)
-
+            start = time.time()
+            resp = requests.post(url, headers=headers, data=json.dumps(payload) if payload else None)
+            self.delta = round(time.time() - start, 3)
+            return self.delta, resp
+        except Exception as e:
+            return -1, None
 
     def request(self, prompt, **kwargs):
-        """
-        Execute the logic for request/response to a Model Provider.
-        Creates the payload, issues the Request to the target Model provider.
-        Unpackage the response, it any
-        """
+        if not self.req_maker:
+            return "!!ERROR!! No model provider configured."
 
-        ## (1) Creates the payload through the ModelRequestMaker
+        # build URL & payload
         url = self.req_maker.url_chat(self.base_url)
-        payload = self.req_maker.package(model=self.model, prompt=prompt, **kwargs)
-        payload = json.dumps(payload) if payload else None
+        payload = self.req_maker.package(self.model, prompt, **kwargs)
 
-        print('P->', url, payload)
+        # send and unpack
+        delta, resp = self._call(url, payload)
+        if resp is None:
+            return f"!!ERROR!! Request to {url} failed."
+        if resp.status_code == 401:
+            return "!!ERROR!! Authentication failed – check your API key."
+        if resp.status_code != 200:
+            return f"!!ERROR!! HTTP {resp.status_code}: {resp.text}"
 
-        ## (2) Creates the HTTP-Req
-        delta, response = self._call(url=url, payload=payload)
-
-        # (3) Load the results
-        if response is None:
-            self.delta = -1
-            self.response = None
-            self.result = "!!ERROR!! There was no response (?)"
-        elif isinstance(response,str):
-            self.delta = -1
-            self.response = None
-            self.result = response
-        elif response.status_code == 401:
-            self.delta = -1
-            self.response = None
-            self.result = f"!!ERROR!! Authentication issue. You need to adjust .env with API_KEY ({self.base_url})"
-        elif response.status_code == 200:
-            self.delta = round(delta, 3)
-            self.response = response.json()
-            self.result = self.req_maker.unpackage(self.response)
-        else: 
-            self.delta = -1
-            self.response = None
-            self.result = f"!!ERROR!! HTTP Response={response.status_code}, {response.text}"
-        
-        return self.result 
-
-
-##
-## DEBUG
-## TO BE DELETED
-
-if __name__ == '__main__':
-    from dotenv import dotenv_values
-
-    # load token from .env
-    config = dotenv_values('.env')
-    URL = config['SERVER_URL']
-    MODEL = config['SERVER_MODEL'] if 'SERVER_MODEL' in config else None
-    TYPE = config['SERVER_TYPE'] if 'SERVER_TYPE' in config else None
-    API_KEY = config['SERVER_API_KEY'] if 'SERVER_API_KEY' in config else None
-
-    # Configure a ModelProvider if there is an URL
-    provider = ModelProvider(type=TYPE,  base_url=URL, api_key=API_KEY, model=MODEL) if URL else None
-    print(provider.request(prompt="1+1"))
-
+        data = resp.json()
+        return self.req_maker.unpackage(data)
