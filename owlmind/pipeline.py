@@ -3,11 +3,12 @@ import json
 from urllib.parse import urljoin
 import time
 
+# --- Request Maker Base ---
 class ModelRequestMaker:
-    def url_models(self, url):
+    def url_models(self, base_url):
         raise NotImplementedError("url_models() must be overridden")
 
-    def url_chat(self, url):
+    def url_chat(self, base_url):
         raise NotImplementedError("url_chat() must be overridden")
     
     def package(self, model, prompt, **kwargs):
@@ -17,9 +18,10 @@ class ModelRequestMaker:
         raise NotImplementedError("unpackage() must be overridden")
 
 
+# --- Ollama ---
 class OllamaRequest(ModelRequestMaker):
-    def url_chat(self, url):
-        return urljoin(url, '/api/generate')
+    def url_chat(self, base_url):
+        return urljoin(base_url, '/api/generate')
     
     def package(self, model, prompt, **kwargs):
         payload = {
@@ -35,95 +37,109 @@ class OllamaRequest(ModelRequestMaker):
         return response.get('response')
 
 
+# --- OpenWebUI ---
 class OpenWebUIRequest(ModelRequestMaker):
-    def url_chat(self, url):
-        return urljoin(url, '/api/chat/completions')
+    def url_chat(self, base_url):
+        return urljoin(base_url, '/api/chat/completions')
     
     def package(self, model, prompt, **kwargs):
+        messages = [{"role": "user", "content": prompt}]
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": messages
         }
-        # you can pass temperature, top_p, etc. via kwargs
+        # e.g. include temperature, max_tokens in kwargs
         payload.update(kwargs)
         return payload
     
     def unpackage(self, response):
         choices = response.get('choices', [])
         if choices:
-            return choices[0]['message']['content']
+            return choices[0].get('message', {}).get('content')
         return None
 
 
+# --- OpenAI (official API) ---
 class OpenAIRequest(ModelRequestMaker):
-    def url_chat(self, url):
-        # base_url should be "https://api.openai.com/v1"
-        return f"{url.rstrip('/')}/chat/completions"
+    def url_models(self, base_url):
+        return urljoin(base_url, '/models')
+
+    def url_chat(self, base_url):
+        return urljoin(base_url, '/chat/completions')
     
     def package(self, model, prompt, **kwargs):
+        # conform to OpenAI chat endpoint
+        messages = [{"role": "user", "content": prompt}]
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": messages,
+            **kwargs
         }
-        # pass through any OpenAI params (temperature, max_tokens, etc.)
-        payload.update(kwargs)
         return payload
-
+    
     def unpackage(self, response):
         choices = response.get('choices', [])
         if choices:
-            return choices[0]['message']['content']
+            return choices[0].get('message', {}).get('content')
         return None
 
 
+# --- ModelProvider ---
 class ModelProvider:
     def __init__(self, base_url, type=None, api_key=None, model=None):
-        self.base_url = base_url
+        self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.model = model
         self.delta = -1
         self.response = None
 
-        # pick the correct request maker
         if type == 'ollama':
             self.req_maker = OllamaRequest()
-            self.type = 'ollama'
         elif type == 'open-webui':
             self.req_maker = OpenWebUIRequest()
-            self.type = 'open-webui'
         elif type == 'openai':
             self.req_maker = OpenAIRequest()
-            self.type = 'openai'
         else:
             self.req_maker = None
-            self.type = None
+        
+        if self.req_maker:
+            self.type = type
+        else:
+            raise ValueError(f"Unsupported MODEL_PROVIDER type: {type}")
 
     def _call(self, url, payload=None):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        
         try:
             start = time.time()
             resp = requests.post(url, json=payload, headers=headers)
-            delta = time.time() - start
-            return delta, resp
+            self.delta = round(time.time() - start, 3)
+            return resp
         except Exception as e:
-            return -1, None
+            self.delta = -1
+            raise RuntimeError(f"Request to {url} failed: {e}")
+
+    def models(self):
+        if not self.req_maker:
+            raise RuntimeError("No request maker configured")
+        url = self.req_maker.url_models(self.base_url)
+        resp = self._call(url, None)
+        return resp.json() if resp.status_code == 200 else resp.text
 
     def request(self, prompt, **kwargs):
         if not self.req_maker:
-            return "!!ERROR!! No model provider configured."
+            return "!!ERROR!! No model provider configured"
+
         url = self.req_maker.url_chat(self.base_url)
-        payload = self.req_maker.package(model=self.model, prompt=prompt, **kwargs)
-        delta, resp = self._call(url, payload)
-
-        if resp is None:
-            return "!!ERROR!! Request failed. Check SERVER_URL and connectivity."
-        if resp.status_code == 401:
-            return "!!ERROR!! Authentication failed. Check your SERVER_API_KEY."
-        if resp.status_code != 200:
+        payload = self.req_maker.package(self.model, prompt, **kwargs)
+        
+        resp = self._call(url, payload)
+        if resp.status_code == 200:
+            data = resp.json()
+            return self.req_maker.unpackage(data)
+        elif resp.status_code == 401:
+            return "!!ERROR!! Authentication failed (check your API key)"
+        else:
             return f"!!ERROR!! HTTP {resp.status_code}: {resp.text}"
-
-        self.delta = round(delta, 3)
-        self.response = resp.json()
-        return self.req_maker.unpackage(self.response)
