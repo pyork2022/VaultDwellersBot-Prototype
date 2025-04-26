@@ -1,86 +1,131 @@
-##
-## OwlMind - Platform for Education and Experimentation with Generative Intelligent Systems
-## simple.py :: Simplified AI-first message handler
-##
-#  
-# Copyright (c) 2024, The Generative Intelligence Lab @ FAU
-# 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights 
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-# 
-# Documentation and Getting Started:
-#    https://github.com/genilab-fau/owlmind
-#
-# Disclaimer: 
-# Generative AI has been used extensively while developing this package.
-#
+import requests
+import json
+from urllib.parse import urljoin
+import time
 
-import csv
-from .agent import Plan
-from .bot import BotEngine, BotMessage
+class ModelRequestMaker:
+    def url_models(self, url):
+        raise NotImplementedError("url_models() must be overridden")
 
-class SimpleEngine(BotEngine):
+    def url_chat(self, url):
+        raise NotImplementedError("url_chat() must be overridden")
+    
+    def package(self, model, prompt, **kwargs):
+        raise NotImplementedError("package() must be overridden")
+
+    def unpackage(self, response):
+        raise NotImplementedError("unpackage() must be overridden")
+
+
+class OllamaRequest(ModelRequestMaker):
+    def url_chat(self, url):
+        return urljoin(url, '/api/generate')
+    
+    def package(self, model, prompt, **kwargs):
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+        }
+        if kwargs:
+            payload["options"] = {key: value for key, value in kwargs.items()}
+        return payload
+    
+    def unpackage(self, response):
+        return response.get('response')
+
+
+class OpenWebUIRequest(ModelRequestMaker):
+    def url_chat(self, url):
+        return urljoin(url, '/api/chat/completions')
+    
+    def package(self, model, prompt, **kwargs):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        return payload
+    
+    def unpackage(self, response):
+        choices = response.get('choices', [])
+        return choices[0]['message']['content'] if choices else None
+
+
+class OpenAIRequest(ModelRequestMaker):
     """
-    SimpleEngine: AI-first message processing.
-
-    Bypasses CSV rules and forwards every user message directly to the configured
-    AI model. Retains a `/help` command for basic info.
+    RequestMaker for OpenAI's REST API (v1).
     """
-    VERSION = "1.2"
+    def url_models(self, url):
+        return urljoin(url, '/models')
+    
+    def url_chat(self, url):
+        return urljoin(url, '/chat/completions')
+    
+    def package(self, model, prompt, **kwargs):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        # include any extra parameters (temperature, max_tokens, etc.)
+        payload.update(kwargs)
+        return payload
+    
+    def unpackage(self, response):
+        choices = response.get('choices', [])
+        return choices[0]['message']['content'] if choices else None
 
-    def __init__(self, id):
-        super().__init__(id)
-        self.rule_file = None
-        self.model_provider = None
 
-    def load(self, file_name):
-        """
-        Legacy CSV rule loader (no longer used with AI-first mode).
-        """
-        row_count = 0
-        try:
-            with open(file_name, mode='r', encoding='utf-8') as file:
-                self.rule_file = file_name
-                reader = csv.DictReader((r for r in file if r.strip() and not r.strip().startswith('#')), escapechar='\\')
-                for row in reader:
-                    condition = {"message": row["message"].strip()}
-                    response = row["response"].strip()
-                    self += Plan(condition=condition, action=response)
-                    row_count += 1
-        except FileNotFoundError:
-            if self.debug:
-                print(f"SimpleEngine.load: file not found: {file_name}")
-        self.announcement = f"SimpleEngine {self.id} loaded {row_count} rules from {file_name}."
+class ModelProvider:
+    def __init__(self, base_url, type=None, api_key=None, model=None):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.type = None
+        self.model = model
+        self.req_maker = None
+        self.delta = -1
+        self.response = None
 
-    def process(self, context: BotMessage):
-        """
-        AI-first processing:
-        - `/help`: show version and instructions.
-        - else: forward message to AI model provider.
-        """
-        msg = context['message']
-
-        # Built-in help command
-        if msg.startswith('/help'):
-            context.response = (
-                f"### Version: {BotMessage.VERSION}\n"
-                "* Use `/help` to show this message.\n"
-                "* Simply chat and I'll forward your text to the AI model."
-            )
-            return
-
-        # Ensure model is configured
-        if not self.model_provider:
-            context.response = "Error: no AI model configured."
-            return
-
-        # Forward raw user message to AI endpoint
-        context.response = self.model_provider.request(msg)
+        # select appropriate request maker
+        if type == 'ollama':
+            self.req_maker = OllamaRequest()
+            self.type = 'ollama'
+        elif type == 'open-webui':
+            self.req_maker = OpenWebUIRequest()
+            self.type = 'open-webui'
+        elif type == 'openai':
+            self.req_maker = OpenAIRequest()
+            self.type = 'openai'
         return
+
+    def _call(self, url, payload=None):
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            start = time.time()
+            response = requests.post(url, json=payload, headers=headers)
+            self.delta = time.time() - start
+        except Exception as e:
+            return -1, None
+        return self.delta, response
+
+    def models(self):
+        url = self.req_maker.url_models(self.base_url)
+        return self._call(url)
+
+    def request(self, prompt, **kwargs):
+        # prepare payload
+        url = self.req_maker.url_chat(self.base_url)
+        payload = self.req_maker.package(model=self.model, prompt=prompt, **kwargs)
+
+        # send HTTP request
+        delta, response = self._call(url, payload)
+        if not response:
+            return "!!ERROR!! No response from API"
+        if response.status_code == 401:
+            return "!!ERROR!! Authentication issue. Check API_KEY"
+        if response.status_code != 200:
+            return f"!!ERROR!! HTTP {response.status_code}: {response.text}"
+
+        data = response.json()
+        return self.req_maker.unpackage(data)
