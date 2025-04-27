@@ -1,18 +1,18 @@
 # bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats + Adventure & SPECIAL-aware XP/Leveling
-
-import os
-import re
-import datetime
 from dotenv import dotenv_values
 import discord
+import re
+import datetime
+import os
 
 from owlmind.pipeline import ModelProvider
 from owlmind.simple   import SimpleEngine
 from owlmind.discord  import DiscordBot
-from owlmind.bot      import BotMessage
+from owlmind.base     import BotEngine, BotMessage
 
 from user_store import get_or_create_user, save_user, table
 from adventure_manager import AdventureManager
+
 
 # ——— XP & Leveling setup —————————————————————————————
 LEVEL_THRESHOLDS = {

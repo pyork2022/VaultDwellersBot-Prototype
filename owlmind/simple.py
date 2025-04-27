@@ -1,6 +1,6 @@
 # owlmind/simple.py
 
-from .bot import BotEngine, BotMessage
+from .base import BotEngine, BotMessage
 
 class SimpleEngine(BotEngine):
     """
