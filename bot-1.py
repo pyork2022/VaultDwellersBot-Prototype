@@ -1,113 +1,110 @@
-## bot-1.py :: Kick off a chat-only Ollama Discord bot with DynamoDB state
+## bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB persistence
 ##
 
 import os
 import re
-import time
-import discord
-import requests
 import datetime
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
-# DynamoDB helper
+from owlmind.pipeline import ModelProvider
+from owlmind.simple import SimpleEngine
+from owlmind.discord import DiscordBot
+from owlmind.bot import BotMessage
+
 from user_store import get_or_create_user, save_user
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Minimal Ollama ModelProvider
-# ──────────────────────────────────────────────────────────────────────────────
-class ModelProvider:
-    def __init__(self, base_url, model):
-        self.base_url = base_url.rstrip('/')
-        self.model    = model
-
-    def request(self, prompt: str) -> str:
-        url     = f"{self.base_url}/api/generate"
-        payload = {
-            "model":  self.model,
-            "prompt": prompt,
-            "stream": False
-        }
-        start = time.time()
-        resp  = requests.post(url, json=payload, timeout=30)
-        if resp.status_code != 200:
-            return f"!!ERROR!! HTTP {resp.status_code}: {resp.text}"
-        return resp.json().get("response", "")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Discord bot
-# ──────────────────────────────────────────────────────────────────────────────
-class VaultDwellersBot(discord.Client):
-    def __init__(self, token, provider, debug=False):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(intents=intents)
-        self.token    = token
-        self.provider = provider
-        self.debug    = debug
-
-    async def on_ready(self):
-        print(f"✅ Logged in as {self.user}")
-
+class PersistingBot(DiscordBot):
+    """
+    Extends OwlMind’s DiscordBot to load/store user state in DynamoDB
+    before & after each engine run.
+    """
     async def on_message(self, message):
-        # ignore the bot itself
-        if message.author == self.user:
+        # 1) Ignore non‐DM/non‐mention or bot itself
+        if message.author == self.user or (
+            not self.promiscuous and
+            not (self.user in message.mentions or isinstance(message.channel, discord.DMChannel))
+        ):
             return
 
-        # strip out @mentions
+        # 2) Strip mention tags
         text = re.sub(r"<@\d+>", "", message.content).strip()
         if not text:
             return
 
-        # ───────────────
-        # 1) Load (or initialize) user state
-        uid  = str(message.author.id)
-        user = get_or_create_user(uid)
+        # 3) Load or initialize user state
+        user_id = str(message.author.id)
+        user    = get_or_create_user(user_id)
+        user['XP'] = user.get('XP', 0) + 1  # +1 XP just for showing up
 
-        # give 1 XP for any message
-        user['XP'] += 1
-        # ───────────────
+        # 4) Build the OwlMind context
+        context = BotMessage(
+            layer1       = message.guild.id        if message.guild else 0,
+            layer2       = message.channel.id      if hasattr(message.channel, 'id') else 0,
+            layer3       = message.channel.id      if isinstance(message.channel, discord.Thread) else 0,
+            layer4       = message.author.id,
+            server_name  = message.guild.name      if message.guild else '#dm',
+            channel_name = message.channel.name    if hasattr(message.channel, 'name') else '#dm',
+            thread_name  = message.channel.name    if isinstance(message.channel, discord.Thread) else '',
+            author_name     = message.author.name,
+            author_fullname = message.author.global_name,
+            author          = message.author.global_name,
+            bot             = self.user,
+            timestamp       = datetime.datetime.now(),
+            date            = datetime.datetime.now().strftime("%d-%b-%Y"),
+            time            = datetime.datetime.now().strftime("%H:%M:%S"),
+            message         = text,
+            attachments     = [a.url for a in message.attachments],
+            reactions       = [str(r.emoji) for r in message.reactions]
+        )
 
-        # 2) Call the LLM
-        reply = self.provider.request(text)
+        # 5) Run through OwlMind’s engine
+        if self.engine:
+            self.engine.process(context)
 
-        # ───────────────
-        # 3) Record history and unlock simple perks
-        user['History'].append({
-            'when':   datetime.datetime.utcnow().isoformat(),
-            'prompt': text,
-            'reply':  reply
-        })
+        # 6) If we got a response, record & save user state, then send it
+        if context.response:
+            reply = str(context.response)
 
-        # Example: at 10 XP unlock a “First 10 XP” perk
-        if user['XP'] >= 10 and 'First 10 XP' not in user['Perks']:
-            user['Perks'].append('First 10 XP')
-            reply = "🎉 You’ve unlocked the “First 10 XP” perk!\n\n" + reply
+            # Record this interaction
+            user.setdefault('History', []).append({
+                'when':   datetime.datetime.utcnow().isoformat(),
+                'prompt': text,
+                'reply':  reply
+            })
 
-        # Persist back to DynamoDB
-        save_user(user)
-        # ───────────────
+            # Example perk at 10 XP
+            if user['XP'] >= 10 and 'First 10 XP' not in user.get('Perks', []):
+                user.setdefault('Perks', []).append('First 10 XP')
+                reply = "🎉 You’ve unlocked the “First 10 XP” perk!\n\n" + reply
 
-        # 4) Chunk & send the reply
-        max_len = 2000
-        for i in range(0, len(reply), max_len):
-            await message.channel.send(reply[i:i+max_len])
+            # Save back to DynamoDB
+            save_user(user)
 
-    def run(self):
-        super().run(self.token)
+            # 7) Chunk & send
+            max_len = 2000
+            for i in range(0, len(reply), max_len):
+                await message.channel.send(reply[i:i+max_len])
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Launcher
-# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    load_dotenv()  # loads .env into os.environ
+    # load .env
+    cfg = dotenv_values('.env')
+    TOKEN = cfg.get('DISCORD_TOKEN')
+    URL   = cfg.get('SERVER_URL')
+    TYPE  = cfg.get('SERVER_TYPE')
+    MODEL = cfg.get('SERVER_MODEL')
 
-    TOKEN = os.getenv("DISCORD_TOKEN")
-    URL   = os.getenv("SERVER_URL")
-    MODEL = os.getenv("SERVER_MODEL")
-    AWS_REGION = os.getenv("AWS_REGION")
+    print("→", TYPE, URL, MODEL)
 
-    print(f"→ URL: {URL!r}, MODEL: {MODEL!r}, AWS_REGION: {AWS_REGION!r}")
+    # wire up OwlMind engine
+    provider = ModelProvider(
+        type     = TYPE,
+        base_url = URL,
+        api_key  = cfg.get('SERVER_API_KEY'),
+        model    = MODEL
+    )
+    engine = SimpleEngine(id='bot-1')
+    engine.model_provider = provider
 
-    provider = ModelProvider(base_url=URL, model=MODEL)
-    bot      = VaultDwellersBot(token=TOKEN, provider=provider, debug=True)
+    # launch our PersistingBot
+    bot = PersistingBot(token=TOKEN, engine=engine, promiscuous=False, debug=True)
     bot.run()
