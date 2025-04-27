@@ -9,8 +9,9 @@ from owlmind.simple import SimpleEngine
 from owlmind.discord import DiscordBot
 from owlmind.bot import BotMessage
 
-from user_store import get_or_create_user, save_user, table
+from user_store import get_or_create_user, save_user, table, award_xp
 from adventure_manager import AdventureManager
+from quiz_manager import QuizManager  # Import the QuizManager
 
 # ——— XP & Leveling setup —————————————————————————————
 LEVEL_THRESHOLDS = {
@@ -19,22 +20,6 @@ LEVEL_THRESHOLDS = {
     11: 5500, 12: 6600, 13: 7800, 14: 9100, 15: 10500,
     16: 12000, 17: 13600, 18: 15300, 19: 17100, 20: 19000
 }
-
-def award_xp(user: dict, base_xp: int = 1):
-    intel = user.get("SPECIAL", {}).get("Intelligence", 0)
-    bonus = intel // 3
-    total = base_xp + bonus
-
-    user["XP"] = user.get("XP", 0) + total
-
-    old = user.get("Level", 1)
-    new = old
-    for lvl, req in sorted(LEVEL_THRESHOLDS.items()):
-        if user["XP"] >= req:
-            new = lvl
-
-    user["Level"] = new
-    return total, old, new
 
 # ——————————————————————————————————————————————————————————
 
@@ -183,6 +168,7 @@ class PersistingBot(DiscordBot):
 
 
 if __name__ == "__main__":
+    # Load environment variables from the .env file
     cfg = dotenv_values(".env")
     TOKEN = cfg.get("DISCORD_TOKEN")
     URL = cfg.get("SERVER_URL")
@@ -199,6 +185,9 @@ if __name__ == "__main__":
     )
     engine = SimpleEngine(id="bot-1")
     engine.model_provider = provider
+
+    # Initialize the QuizManager with the provider
+    QuizManager.initialize(provider)
 
     bot = PersistingBot(token=TOKEN, engine=engine, promiscuous=False, debug=True)
     bot.run()
