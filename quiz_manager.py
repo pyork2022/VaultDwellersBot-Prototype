@@ -1,12 +1,15 @@
+# quiz_manager.py
+
 import json
 import logging
 import re
+from typing import Tuple
 from owlmind.pipeline import ModelProvider
 
 logger = logging.getLogger(__name__)
 
 class QuizManager:
-    provider = None  # Will be set when the bot starts
+    provider: ModelProvider = None  # Will be set when the bot starts
 
     @classmethod
     def initialize(cls, model_provider: ModelProvider):
@@ -43,7 +46,7 @@ class QuizManager:
         clean = raw.strip().replace("\\'", "'")
         logger.debug("✨ Cleaned for JSON parsing (before brace-fix):\n%s", clean)
 
-        # Auto-balance braces if the model missed a closing }
+        # Auto-balance braces if needed
         opens = clean.count('{')
         closes = clean.count('}')
         if opens > closes:
@@ -62,12 +65,12 @@ class QuizManager:
         except (ValueError, KeyError) as e:
             logger.debug("⚠️ JSON parse failed: %s", e)
 
-            # Try fallback parsing
+            # Fallback parsing for free-form text
             if "Question:" in raw and "Answer:" in raw:
                 try:
                     part = raw.split("Question:", 1)[1]
                     q_text, a_text = part.split("Answer:", 1)
-                    logger.debug("✅ Parsed free-form Q/A fallback successfully")
+                    logger.debug("✅ Parsed fallback Q/A successfully")
                     return {
                         "question": q_text.strip(),
                         "answer":   a_text.strip()
@@ -79,11 +82,11 @@ class QuizManager:
         logger.debug("❓ Falling back to generic question for subject=%r", subject)
         return {
             "question": f"What is an advanced concept in {subject}?",
-            "answer":   "fallback"  # Special flag we will handle separately
+            "answer": "fallback"  # Special flag we handle separately
         }
 
     @staticmethod
-    def evaluate(user_answer: str, correct_answer: str) -> tuple:
+    def evaluate(user_answer: str, correct_answer: str) -> Tuple[bool, bool]:
         """
         Evaluate the user answer against the correct one.
         Returns (passed: bool, fallback: bool)
@@ -97,6 +100,31 @@ class QuizManager:
         fallback = correct_norm == "fallback"
 
         if fallback:
-            return True, True  # Always pass fallback questions
+            return True, True  # Always correct if fallback question
 
-        return user_norm == correct_norm, False
+        if user_norm == correct_norm:
+            return True, False
+
+        # Allow minor typos (Levenshtein distance <= 2)
+        def levenshtein(s1: str, s2: str) -> int:
+            if len(s1) < len(s2):
+                return levenshtein(s2, s1)
+            if len(s2) == 0:
+                return len(s1)
+            previous_row = range(len(s2) + 1)
+            for i, c1 in enumerate(s1):
+                current_row = [i + 1]
+                for j, c2 in enumerate(s2):
+                    insertions = previous_row[j + 1] + 1
+                    deletions = current_row[j] + 1
+                    substitutions = previous_row[j] + (c1 != c2)
+                    current_row.append(min(insertions, deletions, substitutions))
+                previous_row = current_row
+            return previous_row[-1]
+
+        distance = levenshtein(user_norm, correct_norm)
+
+        if distance <= 2:
+            return True, False
+
+        return False, False
