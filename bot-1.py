@@ -1,59 +1,113 @@
-## bot-1.py :: Kick off a chat-only Ollama Discord bot
+## bot-1.py :: Kick off a chat-only Ollama Discord bot with DynamoDB state
 ##
 
-import owlmind.pipeline as _p
-if hasattr(_p, 'BotPipeline'):    # or whatever class you found
-    # override the method that does the fallback:
-    orig = _p.BotPipeline.process
-    def patched(self, ctx):
-        # clear any lingering defaults
-        if hasattr(ctx, 'response') and isinstance(ctx.response, str) and ctx.response.startswith("#### DEFAULT"):
-            ctx.response = None
-        return orig(self, ctx)
-    _p.BotPipeline.process = patched
+import os
+import re
+import time
+import discord
+import requests
+import datetime
+from dotenv import load_dotenv
 
-from dotenv import dotenv_values
-from owlmind.pipeline import ModelProvider
-from owlmind.simple import SimpleEngine
-from owlmind.discord import DiscordBot
+# DynamoDB helper
+from user_store import get_or_create_user, save_user
 
-class CleanEngine(SimpleEngine):
-    """
-    A SimpleEngine override that retains /help, /info, /reload
-    but bypasses OwlMind’s legacy rule fallback for all other messages.
-    """
-    def process(self, context):
-        msg = context['message'].strip()
+# ──────────────────────────────────────────────────────────────────────────────
+# Minimal Ollama ModelProvider
+# ──────────────────────────────────────────────────────────────────────────────
+class ModelProvider:
+    def __init__(self, base_url, model):
+        self.base_url = base_url.rstrip('/')
+        self.model    = model
 
-        # Handle built-in commands via the parent implementation
-        if msg in ('/help', '/info', '/reload'):
-            return super().process(context)
+    def request(self, prompt: str) -> str:
+        url     = f"{self.base_url}/api/generate"
+        payload = {
+            "model":  self.model,
+            "prompt": prompt,
+            "stream": False
+        }
+        start = time.time()
+        resp  = requests.post(url, json=payload, timeout=30)
+        if resp.status_code != 200:
+            return f"!!ERROR!! HTTP {resp.status_code}: {resp.text}"
+        return resp.json().get("response", "")
 
-        # Otherwise, skip any rule-engine default and call the LLM directly
-        if self.model_provider:
-            context.response = self.model_provider.request(msg)
-        else:
-            context.response = None
+# ──────────────────────────────────────────────────────────────────────────────
+# Discord bot
+# ──────────────────────────────────────────────────────────────────────────────
+class VaultDwellersBot(discord.Client):
+    def __init__(self, token, provider, debug=False):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(intents=intents)
+        self.token    = token
+        self.provider = provider
+        self.debug    = debug
 
-if __name__ == '__main__':
-    config = dotenv_values('.env')
-    TOKEN = config.get('DISCORD_TOKEN')
-    URL   = config.get('SERVER_URL')
-    TYPE  = config.get('SERVER_TYPE')
-    MODEL = config.get('SERVER_MODEL')
+    async def on_ready(self):
+        print(f"✅ Logged in as {self.user}")
 
-    # make sure these loaded
-    print("→", TYPE, URL, MODEL)
+    async def on_message(self, message):
+        # ignore the bot itself
+        if message.author == self.user:
+            return
 
-    provider = ModelProvider(
-        type=TYPE,
-        base_url=URL,
-        api_key=None,
-        model=MODEL
-    )
+        # strip out @mentions
+        text = re.sub(r"<@\d+>", "", message.content).strip()
+        if not text:
+            return
 
-    engine = CleanEngine(id='bot-1')
-    engine.model_provider = provider
+        # ───────────────
+        # 1) Load (or initialize) user state
+        uid  = str(message.author.id)
+        user = get_or_create_user(uid)
 
-    bot = DiscordBot(token=TOKEN, engine=engine, debug=True)
+        # give 1 XP for any message
+        user['XP'] += 1
+        # ───────────────
+
+        # 2) Call the LLM
+        reply = self.provider.request(text)
+
+        # ───────────────
+        # 3) Record history and unlock simple perks
+        user['History'].append({
+            'when':   datetime.datetime.utcnow().isoformat(),
+            'prompt': text,
+            'reply':  reply
+        })
+
+        # Example: at 10 XP unlock a “First 10 XP” perk
+        if user['XP'] >= 10 and 'First 10 XP' not in user['Perks']:
+            user['Perks'].append('First 10 XP')
+            reply = "🎉 You’ve unlocked the “First 10 XP” perk!\n\n" + reply
+
+        # Persist back to DynamoDB
+        save_user(user)
+        # ───────────────
+
+        # 4) Chunk & send the reply
+        max_len = 2000
+        for i in range(0, len(reply), max_len):
+            await message.channel.send(reply[i:i+max_len])
+
+    def run(self):
+        super().run(self.token)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Launcher
+# ──────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    load_dotenv()  # loads .env into os.environ
+
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    URL   = os.getenv("SERVER_URL")
+    MODEL = os.getenv("SERVER_MODEL")
+    AWS_REGION = os.getenv("AWS_REGION")
+
+    print(f"→ URL: {URL!r}, MODEL: {MODEL!r}, AWS_REGION: {AWS_REGION!r}")
+
+    provider = ModelProvider(base_url=URL, model=MODEL)
+    bot      = VaultDwellersBot(token=TOKEN, provider=provider, debug=True)
     bot.run()
