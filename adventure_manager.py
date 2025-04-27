@@ -8,13 +8,13 @@ ENVIRONMENTS = [
     "abandoned factories of Grafton",
     "irradiated wastes of the Glowing Sea",
     "ruins of Megaton",
-    "deserted vault 13",
+    "deserted Vault 13",
     "overrun Brotherhood bunker",
-    "Filian the Vtuber's abandoned home",
-    "An abandoned Mega Mart",
-    "Vault 101, Amata is Overseer",
-    "A raider is approaching you, brandishing a firearm",
-    "A dazed scientist sprints towards you with a syringe in his hand"
+    "an abandoned Mega Mart",
+    "Vault 101 where Amata is Overseer",
+    "a raider outpost in the wastes",
+    "a secret Enclave lab",
+    "the ruins of Rivet City"
 ]
 
 class AdventureManager:
@@ -25,6 +25,7 @@ class AdventureManager:
             'env': None,
             'step': 0,
             'awaiting': None,   # 'quiz' when waiting for an answer
+            'subject': None,
             'payload': {}
         })
 
@@ -36,25 +37,42 @@ class AdventureManager:
             self.state['env'] = random.choice(ENVIRONMENTS)
             self.state['step'] = 1
         self.save_state()
-        return f"🗺️ Your adventure begins in the {self.state['env']}! Use `/adventure quiz` to face your first challenge."
+        return (
+            f"🗺️ Your adventure begins in the {self.state['env']}!  "
+            "Use `/adventure quiz` to face your first challenge."
+        )
 
-    def next_quiz(self) -> str:
-        # for now, all environments use the "fallout lore" pool
-        subject = "fallout lore"
-        question, answer = QuizManager.create_quiz(subject)
+    def next_quiz(self, subject: str = None) -> str:
+        # if user specified a subject (e.g. "python syntax" or "fallout lore")
+        if subject:
+            subkey = subject.lower()
+        else:
+            subkey = "fallout lore"
+
+        # store subject for later narrative
+        self.state['subject'] = subkey
+        question, answer = QuizManager.create_quiz(subkey)
+
         self.state['awaiting'] = 'quiz'
-        self.state['payload']['answer'] = answer
+        self.state['payload'] = {'answer': answer}
         self.save_state()
-        return f"🔎 **Skill Check ({subject})**:\n{question}"
+
+        return f"🔎 **Skill Check ({subkey})**:\n{question}"
 
     def handle_answer(self, text: str) -> str:
         correct = QuizManager.evaluate(text, self.state['payload']['answer'])
         self.state['awaiting'] = None
         self.state['payload'].clear()
-        # advance story step if you like:
         self.state['step'] += 1
         self.save_state()
+
         if correct:
-            return "✅ You passed the challenge! The path ahead is clearer.\nUse `/adventure quiz` again or just chat to continue."
+            return (
+                "✅ You passed the challenge! The path ahead is clearer.  "
+                "Use `/adventure quiz` again or just chat to continue."
+            )
         else:
-            return "❌ You failed the challenge—watch your step next time.\nUse `/adventure quiz` again or just chat to continue."
+            return (
+                "❌ You failed the challenge—watch your step next time.  "
+                "Use `/adventure quiz` again or just chat to continue."
+            )
