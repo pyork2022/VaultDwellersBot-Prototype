@@ -10,22 +10,22 @@ ENVIRONMENTS = [
     "ruins of Megaton",
     "deserted Vault 13",
     "overrun Brotherhood bunker",
+    "Filian the VTuber's abandoned home",
     "an abandoned Mega Mart",
-    "Vault 101 where Amata is Overseer",
-    "a raider outpost in the wastes",
-    "a secret Enclave lab",
-    "the ruins of Rivet City"
+    "Vault 101, where Amata is Overseer",
+    "a raider ambushing you with a firearm",
+    "a crazed scientist sprinting at you with a syringe"
 ]
+
+STEPS_PER_ENVIRONMENT = 5  # After 5 challenges, move to new location
 
 class AdventureManager:
     def __init__(self, user_record: dict):
         self.user = user_record
-        # load or initialize
         self.state = user_record.get('AdventureState', {
             'env': None,
             'step': 0,
-            'awaiting': None,   # 'quiz' when waiting for an answer
-            'subject': None,
+            'awaiting': None,
             'payload': {}
         })
 
@@ -33,46 +33,49 @@ class AdventureManager:
         self.user['AdventureState'] = self.state
 
     def start(self) -> str:
-        if not self.state['env']:
-            self.state['env'] = random.choice(ENVIRONMENTS)
-            self.state['step'] = 1
+        self.state['env'] = random.choice(ENVIRONMENTS)
+        self.state['step'] = 0
         self.save_state()
+        return f"🗺️ Your adventure begins in the {self.state['env']}! Use `/adventure quiz` to face your first challenge."
+
+    def next_quiz(self, subject: str = "fallout lore") -> str:
+        if self.state['step'] > 0 and self.state['step'] % STEPS_PER_ENVIRONMENT == 0:
+            # Move to new environment
+            self.state['env'] = random.choice(ENVIRONMENTS)
+            self.state['step'] = 0
+            env_message = f"🌎 You’ve traveled onward and arrived at the {self.state['env']}!"
+        else:
+            env_message = f"🛤️ You’re still navigating the {self.state['env']}..."
+
+        question, answer = QuizManager.create_quiz(subject)
+        self.state['awaiting'] = 'quiz'
+        self.state['payload'] = {'answer': answer, 'subject': subject}
+        self.save_state()
+
         return (
-            f"🗺️ Your adventure begins in the {self.state['env']}!  "
-            "Use `/adventure quiz` to face your first challenge."
+            f"{env_message}\n\n"
+            f"🔎 **Skill Check ({subject})**:\n{question}"
         )
 
-    def next_quiz(self, subject: str = None) -> str:
-        # if user specified a subject (e.g. "python syntax" or "fallout lore")
-        if subject:
-            subkey = subject.lower()
-        else:
-            subkey = "fallout lore"
-
-        # store subject for later narrative
-        self.state['subject'] = subkey
-        question, answer = QuizManager.create_quiz(subkey)
-
-        self.state['awaiting'] = 'quiz'
-        self.state['payload'] = {'answer': answer}
-        self.save_state()
-
-        return f"🔎 **Skill Check ({subkey})**:\n{question}"
-
     def handle_answer(self, text: str) -> str:
-        correct = QuizManager.evaluate(text, self.state['payload']['answer'])
+        env = self.state['env']
+        expected = self.state['payload'].get('answer', '')
+        correct = QuizManager.evaluate(text, expected)
         self.state['awaiting'] = None
-        self.state['payload'].clear()
-        self.state['step'] += 1
-        self.save_state()
+        self.state['payload'] = {}
+
+        result_message = ""
 
         if correct:
-            return (
-                "✅ You passed the challenge! The path ahead is clearer.  "
-                "Use `/adventure quiz` again or just chat to continue."
+            result_message = (
+                f"✅ Success! In the {env}, you handled the situation brilliantly. "
+                "You press on with confidence.\n"
             )
         else:
-            return (
-                "❌ You failed the challenge—watch your step next time.  "
-                "Use `/adventure quiz` again or just chat to continue."
+            result_message = (
+                f"❌ Failure! In the {env}, you stumble, but survive to fight another day.\n"
             )
+
+        self.state['step'] += 1
+        self.save_state()
+        return result_message + "Use `/adventure quiz` to continue."
