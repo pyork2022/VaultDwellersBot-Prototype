@@ -1,5 +1,6 @@
 import os
 import re
+import random
 import logging
 from dotenv import dotenv_values
 import discord
@@ -29,14 +30,12 @@ PERKS_POOL = [
 class PersistingBot(DiscordBot):
     async def on_ready(self):
         logger.debug("Bot is ready and connected.")
-        # Initialize the QuizManager provider
         if QuizManager.provider is None:
             logger.debug("Initializing QuizManager provider.")
             QuizManager.initialize(self.engine.model_provider)
             logger.debug("QuizManager provider initialized.")
 
     async def on_message(self, message):
-        # Ignore own messages and those not mentioning the bot (if not promiscuous)
         if message.author == self.user or (
             not self.promiscuous and
             not (self.user in message.mentions or isinstance(message.channel, discord.DMChannel))
@@ -53,8 +52,6 @@ class PersistingBot(DiscordBot):
         user = get_or_create_user(uid)
         manager = AdventureManager(user)
 
-        cmd = text.lower().split()[0]
-
         # Help command
         if text.lower().startswith("/help"):
             reply = (
@@ -67,7 +64,7 @@ class PersistingBot(DiscordBot):
             )
             return await message.channel.send(reply)
 
-        # Reset/restart commands
+        # Reset/restart
         if text.lower().startswith("/reset") or text.lower().startswith("/restart"):
             table.delete_item(Key={"discordUserID": uid})
             return await message.channel.send(
@@ -104,30 +101,29 @@ class PersistingBot(DiscordBot):
         if manager.state.get("awaiting") == "quiz":
             user_answer = text.strip()
             logger.debug(f"User answer: {user_answer}")
-            # Process answer, may award XP and level
-            passed, fallback = QuizManager.evaluate(user_answer, manager.state['payload'].get('answer',''))
-            # Award XP and check level up
-            if passed and not fallback:
+
+            passed, fallback = QuizManager.evaluate(user_answer, manager.state['payload'].get('answer', ''))
+            correct_answer_text = manager.state['payload'].get('answer', '')
+
+            # If fallback question (open-ended), always count as passed
+            if fallback:
+                passed = True
+
+            level_msg = ''
+            if passed:
                 user['XP'] = user.get('XP', 0) + 1
-                # Level up for every LEVEL_XP XP
                 if user['XP'] % LEVEL_XP == 0:
                     user['Level'] = user.get('Level', 1) + 1
-                    # Grant a random perk
                     perk = random.choice(PERKS_POOL)
                     user.setdefault('Perks', []).append(perk)
                     level_msg = f"🎉 You leveled up to Level {user['Level']}! Perk gained: {perk}."
-                else:
-                    level_msg = ''
-            else:
-                level_msg = ''
 
-            story = manager.handle_answer(user_answer, passed, fallback)
-            # Include correct answer display on failure
+            story = manager.handle_answer(user_answer)
+
+            # Only show correct answer if it was NOT a fallback
             if not passed and not fallback:
-                correct = manager.state['payload'].get('answer', '')
-                story += f"\n📖 Correct Answer: {correct}"
+                story += f"\n📖 Correct Answer: {correct_answer_text}"
 
-            # Append level up message if any
             if level_msg:
                 story += f"\n{level_msg}"
 
@@ -146,10 +142,10 @@ class PersistingBot(DiscordBot):
 
         # Handle SPECIAL allocation
         if re.fullmatch(r"\d+(,\s*\d+){6}", text):
-            parts = [int(x) for x in text.split(",")] 
+            parts = [int(x) for x in text.split(",")]
             if sum(parts) != 28:
                 return await message.channel.send("❌ That doesn’t sum to 28—try again.")
-            labels = ["Strength","Perception","Endurance","Charisma","Intelligence","Agility","Luck"]
+            labels = ["Strength", "Perception", "Endurance", "Charisma", "Intelligence", "Agility", "Luck"]
             stats = dict(zip(labels, parts))
             user['SPECIAL'] = stats
             user['XP'] = 0
