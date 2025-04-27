@@ -1,10 +1,11 @@
-## bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB persistence
+## bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats
 ##
 
 import os
 import re
 import datetime
 from dotenv import dotenv_values
+import discord
 
 from owlmind.pipeline import ModelProvider
 from owlmind.simple import SimpleEngine
@@ -15,28 +16,75 @@ from user_store import get_or_create_user, save_user
 
 class PersistingBot(DiscordBot):
     """
-    Extends OwlMind’s DiscordBot to load/store user state in DynamoDB
-    before & after each engine run.
+    Extends OwlMind’s DiscordBot to:
+     • Handle /start & /stats before AI
+     • Load/store user state in DynamoDB
     """
     async def on_message(self, message):
-        # 1) Ignore non‐DM/non‐mention or bot itself
+        # 1) Ignore the bot itself, or non-mentions if not promiscuous
         if message.author == self.user or (
             not self.promiscuous and
             not (self.user in message.mentions or isinstance(message.channel, discord.DMChannel))
         ):
             return
 
-        # 2) Strip mention tags
+        # 2) Strip out <@…> mentions
         text = re.sub(r"<@\d+>", "", message.content).strip()
         if not text:
             return
 
-        # 3) Load or initialize user state
-        user_id = str(message.author.id)
-        user    = get_or_create_user(user_id)
-        user['XP'] = user.get('XP', 0) + 1  # +1 XP just for showing up
+        # 3) /start: allocate SPECIAL for brand-new users
+        if text.lower().startswith("/start"):
+            uid  = str(message.author.id)
+            user = get_or_create_user(uid)
+            # only allow if XP==0
+            if user.get("XP", 0) != 0:
+                return await message.channel.send("You’ve already set up your SPECIAL stats.")
+            return await message.channel.send(
+                "Welcome to VaultDwellersBot! You have **28** points to assign across your SPECIAL stats.\n"
+                "Reply with 7 comma-separated integers (must sum to 28) in order:\n"
+                "`Strength, Perception, Endurance, Charisma, Intelligence, Agility, Luck`\n"
+                "Example: `5,5,5,5,5,2,1`"
+            )
 
-        # 4) Build the OwlMind context
+        # 4) Handle the user’s allocation reply
+        if re.fullmatch(r"\d+(,\s*\d+){6}", text):
+            parts = [int(x) for x in text.split(",")]
+            if sum(parts) != 28:
+                return await message.channel.send("❌ That doesn’t sum to 28—try again.")
+            stats = dict(zip(
+                ["Strength","Perception","Endurance","Charisma","Intelligence","Agility","Luck"],
+                parts
+            ))
+            uid  = str(message.author.id)
+            user = get_or_create_user(uid)
+            user["SPECIAL"] = stats
+            save_user(user)
+            return await message.channel.send(f"SPECIAL set to {stats}!\nYou can now send `/stats` or just chat.")
+
+        # 5) /stats: show profile
+        if text.lower().strip() == "/stats":
+            uid  = str(message.author.id)
+            user = get_or_create_user(uid)
+            xp    = user.get("XP", 0)
+            level = user.get("Level", 1)
+            stats = user.get("SPECIAL", {})
+            perks = user.get("Perks", [])
+            reply = (
+                f"**Vault Dweller Profile**\n"
+                f"• XP: {xp}   Level: {level}\n"
+                f"• SPECIAL:\n"
+                + "\n".join(f"  – {k}: {v}" for k,v in stats.items()) +
+                f"\n• Perks: {', '.join(perks) or 'None'}"
+            )
+            return await message.channel.send(reply)
+
+        # 6) Load/create user record & bump XP
+        uid  = str(message.author.id)
+        user = get_or_create_user(uid)
+        user['XP'] = user.get('XP', 0) + 1
+
+        # 7) Build OwlMind context
         context = BotMessage(
             layer1       = message.guild.id        if message.guild else 0,
             layer2       = message.channel.id      if hasattr(message.channel, 'id') else 0,
@@ -57,36 +105,36 @@ class PersistingBot(DiscordBot):
             reactions       = [str(r.emoji) for r in message.reactions]
         )
 
-        # 5) Run through OwlMind’s engine
+        # 8) Run through OwlMind engine
         if self.engine:
             self.engine.process(context)
 
-        # 6) If we got a response, record & save user state, then send it
+        # 9) If we got an AI response, record & save, then send
         if context.response:
             reply = str(context.response)
 
-            # Record this interaction
+            # record history
             user.setdefault('History', []).append({
                 'when':   datetime.datetime.utcnow().isoformat(),
                 'prompt': text,
                 'reply':  reply
             })
 
-            # Example perk at 10 XP
+            # example perk at 10 XP
             if user['XP'] >= 10 and 'First 10 XP' not in user.get('Perks', []):
                 user.setdefault('Perks', []).append('First 10 XP')
                 reply = "🎉 You’ve unlocked the “First 10 XP” perk!\n\n" + reply
 
-            # Save back to DynamoDB
+            # persist update
             save_user(user)
 
-            # 7) Chunk & send
+            # chunk & send
             max_len = 2000
             for i in range(0, len(reply), max_len):
                 await message.channel.send(reply[i:i+max_len])
 
 if __name__ == "__main__":
-    # load .env
+    # load env
     cfg = dotenv_values('.env')
     TOKEN = cfg.get('DISCORD_TOKEN')
     URL   = cfg.get('SERVER_URL')
@@ -95,7 +143,7 @@ if __name__ == "__main__":
 
     print("→", TYPE, URL, MODEL)
 
-    # wire up OwlMind engine
+    # set up OwlMind
     provider = ModelProvider(
         type     = TYPE,
         base_url = URL,
@@ -105,6 +153,6 @@ if __name__ == "__main__":
     engine = SimpleEngine(id='bot-1')
     engine.model_provider = provider
 
-    # launch our PersistingBot
+    # launch PersistingBot in non-promiscuous mode
     bot = PersistingBot(token=TOKEN, engine=engine, promiscuous=False, debug=True)
     bot.run()
