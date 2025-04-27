@@ -1,4 +1,5 @@
 # bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats + SPECIAL-aware XP/Leveling
+
 import os
 import re
 import datetime
@@ -10,7 +11,7 @@ from owlmind.simple import SimpleEngine
 from owlmind.discord import DiscordBot
 from owlmind.bot import BotMessage
 
-from user_store import get_or_create_user, save_user
+from user_store import get_or_create_user, save_user, table  # bring in table for /reset
 
 # ——— XP & Leveling setup —————————————————————————————
 LEVEL_THRESHOLDS = {
@@ -84,7 +85,6 @@ class PersistingBot(DiscordBot):
 
         # 3) /reset — wipe your Dynamo row & start over
         if text.lower().startswith("/reset"):
-            from user_store import table  # Dynamo table object
             table.delete_item(Key={"discordUserID": uid})
             return await message.channel.send(
                 "🔄 Your VaultDweller profile has been reset. Run `/start` to set your SPECIAL stats anew!"
