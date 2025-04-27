@@ -1,3 +1,86 @@
+# VaultDwellersBot - Project Prototype README
+
+### Overview
+VaultDwellersBot is a Fallout-themed, Discord-based interactive educational bot that provides users with a dynamic study experience, gamified through an adventure and SPECIAL stats system. The project combines AI-powered quiz generation with character progression, XP leveling, perks, and Fallout-style narrative.
+
+### Key Features
+
+- **Adventure Mode:**
+  - Users start an adventure in a randomized Fallout-style environment.
+  - Each step of the adventure involves answering quiz questions to progress.
+
+- **Quiz Generation:**
+  - College-level questions are generated dynamically via a connected AI model (Ollama, LLaMA).
+  - Quiz topics can be anything (e.g., "Fallout lore", "rock music", "math").
+
+- **SPECIAL Stats System:**
+  - Users allocate 28 points across 7 SPECIAL stats (Strength, Perception, Endurance, Charisma, Intelligence, Agility, Luck) when starting.
+  - (Currently) SPECIAL stats are stored and available for future game mechanics.
+
+- **XP, Leveling, and Perks:**
+  - Correct answers award XP.
+  - After every 5 XP (for now), users level up.
+  - Upon leveling up, users receive a random perk from a perks pool.
+
+- **Fallback Logic:**
+  - If the AI's response is malformed, fallback generic questions are generated.
+  - Fallback questions automatically accept any reasonable answer.
+
+- **Persistence:**
+  - All user data (XP, Level, SPECIAL, Perks) is stored persistently in DynamoDB.
+
+- **User Commands:**
+  - `/adventure start` - Start a new adventure.
+  - `/adventure quiz <subject>` - Begin a skill check challenge.
+  - `/reset` or `/restart` - Reset user profile.
+  - `/stats` - View SPECIAL, XP, Level, and Perks.
+  - `/start` - Begin SPECIAL stat assignment (first time setup).
+  - `/help` - View all bot commands.
+
+### Technology Stack
+- **Backend:** Python 3.13
+- **Discord Integration:** discord.py
+- **Model Provider:** OwlMind (SimpleEngine)
+- **Database:** AWS DynamoDB
+- **AI/Quiz Generation:** Connected to Ollama running LLaMA 3 models
+- **Hosting:** Local prototype or server-based deployment
+
+### File Structure Highlights
+- `bot-1.py` - Main bot event loop and command handling.
+- `quiz_manager.py` - Quiz generation and answer evaluation logic.
+- `adventure_manager.py` - Adventure progression and environment management.
+- `user_store.py` - User profile storage and XP award mechanics.
+
+### Current Limitations
+- SPECIAL stats currently do not affect gameplay (planned feature).
+- All perks are simple strings without functional effects yet.
+- Leveling curve is basic (fixed XP per level, though future work included detailed thresholds).
+- No difficulty scaling yet based on user level.
+
+### Future Improvements
+- Integrate SPECIAL stats into adventure outcomes.
+- Refine level XP thresholds for a smoother curve.
+- Expand perks with actual passive bonuses.
+- Implement dynamic story choices influenced by SPECIAL stats.
+- Add mini-quests, collectibles, or rewards beyond XP.
+- Improve answer evaluation (e.g., partial credit for near matches).
+
+---
+
+### Quick Start Instructions
+1. Clone the repository.
+2. Set up `.env` file with your Discord Bot Token and Model Provider details.
+3. Launch the bot:
+```bash
+python bot-1.py
+```
+4. Interact with the bot on your configured Discord server!
+
+---
+
+Created by: The Vault Dwellers, 2025  
+Prototype Status: **Working and Ready for Demo** 🚀
+
 
 
 <img src="docs/images/owlmind-banner.png" width=800>
