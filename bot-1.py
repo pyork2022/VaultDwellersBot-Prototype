@@ -1,4 +1,4 @@
-# bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats + SPECIAL-aware XP/Leveling + Quiz branching
+# bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats + Adventure & SPECIAL-aware XP/Leveling
 
 import os
 import re
@@ -7,29 +7,29 @@ from dotenv import dotenv_values
 import discord
 
 from owlmind.pipeline import ModelProvider
-from owlmind.simple import SimpleEngine
-from owlmind.discord import DiscordBot
-from owlmind.bot import BotMessage
+from owlmind.simple   import SimpleEngine
+from owlmind.discord  import DiscordBot
+from owlmind.bot      import BotMessage
 
-from user_store import get_or_create_user, save_user
-from quiz_manager import QuizManager
+from user_store import get_or_create_user, save_user, table
+from adventure_manager import AdventureManager
 
 # ——— XP & Leveling setup —————————————————————————————
 LEVEL_THRESHOLDS = {
-    1:     0,
-    2:   100,
-    3:   300,
-    4:   600,
-    5:  1000,
-    6:  1500,
-    7:  2100,
-    8:  2800,
-    9:  3600,
-    10: 4500,
-    11: 5500,
-    12: 6600,
-    13: 7800,
-    14: 9100,
+     1:     0,
+     2:   100,
+     3:   300,
+     4:   600,
+     5:  1000,
+     6:  1500,
+     7:  2100,
+     8:  2800,
+     9:  3600,
+    10:  4500,
+    11:  5500,
+    12:  6600,
+    13:  7800,
+    14:  9100,
     15: 10500,
     16: 12000,
     17: 13600,
@@ -59,8 +59,14 @@ def award_xp(user: dict, base_xp: int = 1):
     return total, old, new
 # ——————————————————————————————————————————————————————————
 
-
 class PersistingBot(DiscordBot):
+    """
+    Extends OwlMind’s DiscordBot to:
+     • Handle /adventure, /reset, /start, /stats
+     • Load/store user state in DynamoDB
+     • Embed SPECIAL into prompts
+     • Award XP & Level-up
+    """
     async def on_message(self, message):
         # 1) Ignore the bot itself, or non-mentions if not promiscuous
         if message.author == self.user or (
@@ -75,75 +81,37 @@ class PersistingBot(DiscordBot):
         if not text:
             return
 
-        uid = str(message.author.id)
-        user = get_or_create_user(uid)
+        # 3) Load user + adventure state
+        uid     = str(message.author.id)
+        user    = get_or_create_user(uid)
+        manager = AdventureManager(user)
 
-        # ——— handle quiz answer branching ——————————————————
-        pending = user.get("pending_quiz")
-        if pending and not text.startswith("/") and not text.lower().startswith("quiz me on"):
-            correct = pending["answer"]
-            is_right = QuizManager.evaluate(text, correct)
-            user.pop("pending_quiz", None)
-
-            # evaluation prefix
-            eval_msg = "✅ Correct!\n\n" if is_right else f"❌ Nope, the answer was **{correct}**.\n\n"
-
-            # build story‐continuation prompt
-            special = user.get("SPECIAL", {})
-            story_prompt = (
-                f"Your SPECIAL stats: {special}\n"
-                f"The player attempted the quiz and it was "
-                + ("successful." if is_right else "a failure.")
-                + " Continue the Fallout-style narrative from here."
-            )
-
-            ctx = BotMessage(
-                layer1       = message.guild.id if message.guild else 0,
-                layer2       = message.channel.id if hasattr(message.channel,"id") else 0,
-                layer3       = message.channel.id if isinstance(message.channel,discord.Thread) else 0,
-                layer4       = message.author.id,
-                server_name  = message.guild.name if message.guild else "#dm",
-                channel_name = message.channel.name if hasattr(message.channel,"name") else "#dm",
-                thread_name  = message.channel.name if isinstance(message.channel,discord.Thread) else "",
-                author_name     = message.author.name,
-                author_fullname = message.author.global_name,
-                author          = message.author.global_name,
-                bot             = self.user,
-                timestamp       = datetime.datetime.now(),
-                date            = datetime.datetime.now().strftime("%d-%b-%Y"),
-                time            = datetime.datetime.now().strftime("%H:%M:%S"),
-                message         = story_prompt,
-                attachments     = [a.url for a in message.attachments],
-                reactions       = [str(r.emoji) for r in message.reactions]
-            )
-            if self.engine:
-                self.engine.process(ctx)
-
-            # award XP for answering
-            xp_got, lvl_old, lvl_new = award_xp(user, base_xp=1)
-            reply = f"{eval_msg}💠 You earned **{xp_got} XP**.\n\n" + (str(ctx.response) or "")
-
-            # level-up notification
-            if lvl_new > lvl_old:
-                perk = f"Level {lvl_new} Reward"
-                user.setdefault('Perks', []).append(perk)
-                reply += f"\n\n🎉 **Level Up!** You’re now Level {lvl_new} and unlocked **{perk}**."
-
+        # — /adventure start — begin or reset your environment
+        if text.lower().startswith("/adventure start"):
+            resp = manager.start()
             save_user(user)
-            for chunk in (reply[i:i+2000] for i in range(0, len(reply), 2000)):
-                await message.channel.send(chunk)
-            return
-        # ————————————————————————————————————————————————————
+            return await message.channel.send(resp)
 
-        # 3) /reset — wipe your Dynamo row & start over
+        # — /adventure quiz — issue next skill-check
+        if text.lower().startswith("/adventure quiz"):
+            resp = manager.next_quiz()
+            save_user(user)
+            return await message.channel.send(resp)
+
+        # — handle pending quiz answer —
+        if manager.state.get("awaiting") == "quiz":
+            resp = manager.handle_answer(text)
+            save_user(user)
+            return await message.channel.send(resp)
+
+        # — /reset — wipe your DynamoDB row & start over
         if text.lower().startswith("/reset"):
-            from user_store import table
             table.delete_item(Key={"discordUserID": uid})
             return await message.channel.send(
                 "🔄 Your VaultDweller profile has been reset. Run `/start` to set your SPECIAL stats anew!"
             )
 
-        # 4) /start — allocate SPECIAL for new users
+        # — /start — allocate SPECIAL for new users
         if text.lower().startswith("/start"):
             if user.get("XP", 0) != 0:
                 return await message.channel.send("You’ve already set up your SPECIAL stats.")
@@ -154,7 +122,7 @@ class PersistingBot(DiscordBot):
                 "Example: `5,5,5,5,5,2,1`"
             )
 
-        # 5) Handle the user’s SPECIAL allocation reply
+        # — handle SPECIAL allocation reply —
         if re.fullmatch(r"\d+(,\s*\d+){6}", text):
             parts = [int(x) for x in text.split(",")]
             if sum(parts) != 28:
@@ -169,13 +137,13 @@ class PersistingBot(DiscordBot):
                 f"SPECIAL set to {stats}!\nYou can now send `/stats` or just chat."
             )
 
-        # 6) /stats — show profile
+        # — /stats — show profile
         if text.lower().strip() == "/stats":
-            xp    = user.get("XP", 0)
-            level = user.get("Level", 1)
-            stats = user.get("SPECIAL", {})
-            perks = user.get("Perks", [])
-            reply = (
+            xp     = user.get("XP", 0)
+            level  = user.get("Level", 1)
+            stats  = user.get("SPECIAL", {})
+            perks  = user.get("Perks", [])
+            reply  = (
                 f"**Vault Dweller Profile**\n"
                 f"• XP: {xp}   Level: {level}\n"
                 f"• SPECIAL:\n"
@@ -184,18 +152,7 @@ class PersistingBot(DiscordBot):
             )
             return await message.channel.send(reply)
 
-        # 7) “quiz me on …”
-        if text.lower().startswith("quiz me on"):
-            subject = text[10:].strip().lower()
-            try:
-                q, a = QuizManager.create_quiz(subject)
-            except KeyError:
-                return await message.channel.send(f"❓ I don't have quizzes for '{subject}'.")
-            user["pending_quiz"] = {"answer": a}
-            save_user(user)
-            return await message.channel.send(f"❓ **Quiz ({subject})**\n{q}")
-
-        # 8) Build OwlMind context, embedding SPECIAL
+        # — otherwise: build OwlMind context, embedding SPECIAL —
         special = user.get("SPECIAL", {})
         prompt_text = (
             f"Your SPECIAL stats: {special}\n"
@@ -216,43 +173,62 @@ class PersistingBot(DiscordBot):
             timestamp       = datetime.datetime.now(),
             date            = datetime.datetime.now().strftime("%d-%b-%Y"),
             time            = datetime.datetime.now().strftime("%H:%M:%S"),
+            # **THIS** is what the LLM will see
             message         = prompt_text,
             attachments     = [a.url for a in message.attachments],
             reactions       = [str(r.emoji) for r in message.reactions]
         )
 
+        # 8) Run through OwlMind engine
         if self.engine:
             self.engine.process(context)
 
-        # 9) Award XP for a normal chat turn and send LLM reply
+        # 9) If we got an AI response, award XP & possibly level up
         if context.response:
             reply = str(context.response)
+
+            # record history
+            user.setdefault("History", []).append({
+                "when":   datetime.datetime.utcnow().isoformat(),
+                "prompt": text,
+                "reply":  reply
+            })
+
+            # **AWARD** XP for this interaction
             xp_got, lvl_old, lvl_new = award_xp(user, base_xp=1)
             reply = f"💠 You earned **{xp_got} XP**.\n\n" + reply
+
+            # handle level-up perks
             if lvl_new > lvl_old:
                 perk = f"Level {lvl_new} Reward"
-                user.setdefault('Perks', []).append(perk)
+                user.setdefault("Perks", []).append(perk)
                 reply += f"\n\n🎉 **Level Up!** You’re now Level {lvl_new} and unlocked **{perk}**."
-            save_user(user)
-            for chunk in (reply[i:i+2000] for i in range(0, len(reply), 2000)):
-                await message.channel.send(chunk)
 
+            # persist update
+            save_user(user)
+
+            # chunk & send
+            max_len = 2000
+            for i in range(0, len(reply), max_len):
+                await message.channel.send(reply[i:i+max_len])
 
 
 if __name__ == "__main__":
-    cfg = dotenv_values('.env')
-    TOKEN = cfg.get('DISCORD_TOKEN')
-    URL   = cfg.get('SERVER_URL')
-    TYPE  = cfg.get('SERVER_TYPE')
-    MODEL = cfg.get('SERVER_MODEL')
+    cfg   = dotenv_values(".env")
+    TOKEN = cfg.get("DISCORD_TOKEN")
+    URL   = cfg.get("SERVER_URL")
+    TYPE  = cfg.get("SERVER_TYPE")
+    MODEL = cfg.get("SERVER_MODEL")
+
+    print("→", TYPE, URL, MODEL)
 
     provider = ModelProvider(
         type     = TYPE,
         base_url = URL,
-        api_key  = cfg.get('SERVER_API_KEY'),
+        api_key  = cfg.get("SERVER_API_KEY"),
         model    = MODEL
     )
-    engine = SimpleEngine(id='bot-1')
+    engine = SimpleEngine(id="bot-1")
     engine.model_provider = provider
 
     bot = PersistingBot(token=TOKEN, engine=engine, promiscuous=False, debug=True)
