@@ -1,16 +1,28 @@
+##
+## bot-1.py :: Kick off a chat-only Ollama Discord bot
+##
+
 from dotenv import dotenv_values
 from owlmind.pipeline import ModelProvider
-from owlmind.simple   import SimpleEngine
-from owlmind.discord  import DiscordBot
+from owlmind.simple import SimpleEngine
+from owlmind.discord import DiscordBot
 
 if __name__ == '__main__':
-    cfg   = dotenv_values('.env')
-    TOKEN = cfg['DISCORD_TOKEN']
-    URL   = cfg['SERVER_URL']
-    MODEL = cfg.get('SERVER_MODEL')
+    config = dotenv_values('.env')
+    TOKEN = config.get('DISCORD_TOKEN')
+    URL   = config.get('SERVER_URL')
+    TYPE  = config.get('SERVER_TYPE')
+    MODEL = config.get('SERVER_MODEL')
 
-    # Ollama-only provider
-    provider = ModelProvider(base_url=URL, model=MODEL)
+    # make sure these loaded
+    print("→", TYPE, URL, MODEL)
+
+    provider = ModelProvider(
+        type=TYPE,
+        base_url=URL,
+        api_key=None,
+        model=MODEL
+    )
 
     engine = SimpleEngine(id='bot-1')
     engine.model_provider = provider
