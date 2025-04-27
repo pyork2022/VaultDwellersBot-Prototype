@@ -3,6 +3,10 @@ from owlmind.pipeline import ModelProvider
 from owlmind.simple import SimpleEngine
 from owlmind.discord import DiscordBot
 
+import owlmind.simple
+print(">>> simple.py is coming from:", owlmind.simple.__file__)
+
+
 if __name__ == '__main__':
 
     # load credentials from .env
