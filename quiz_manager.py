@@ -1,75 +1,70 @@
-import random
+import json
+import logging
+import re
+from typing import Dict
 from owlmind.pipeline import ModelProvider
 
+logger = logging.getLogger(__name__)
+
 class QuizManager:
-    provider = None  # This will be set when the bot starts
+    provider: ModelProvider = None
 
     @classmethod
-    def initialize(cls, model_provider: ModelProvider):
-        """ Assign the ModelProvider (usually LLaMA through Ollama) """
+    def initialize(cls, model_provider: ModelProvider) -> None:
+        """Assign the LLM provider (e.g., LLaMA via Ollama)."""
         cls.provider = model_provider
+        logger.info("QuizManager initialized with model provider.")
 
     @classmethod
-    def create_quiz(cls, subject: str) -> dict:
+    def create_quiz(cls, subject: str) -> Dict[str, str]:
         """
-        Generate a quiz question dynamically based on the user's subject.
-        Returns a dictionary: {'question': str, 'answer': str}
+        Generate a quiz question on `subject`. Returns a dict with 'question' and 'answer'.
         """
-        if not cls.provider:
-            raise ValueError("QuizManager provider is not initialized.")
+        if cls.provider is None:
+            raise RuntimeError("QuizManager provider is not initialized.")
 
-        # Custom prompt to generate more involved questions
         prompt = (
-            f"Create a challenging and detailed quiz question about '{subject}'. "
-            f"The question should be specific to the topic and focus on advanced details. "
-            f"Make sure the question tests deep understanding and includes specific terminology. "
-            f"Provide the answer in the following format:\n\n"
-            f"Question: <detailed question>\nAnswer: <the correct, well-explained answer>"
+            f"Generate a challenging, college-level quiz question about '{subject}'. "
+            "Respond *only* with valid JSON containing keys 'question' and 'answer'."
         )
+        raw = cls.provider.request(prompt).strip()
+        logger.info("LLM raw response: %s", raw)
 
-        # Request to the provider to generate a quiz question
-        response = cls.provider.request(prompt)
+        # Auto-fix common JSON xssues
+        clean = raw
+        if not clean.startswith('{'):
+            clean = '{' + clean
+        if clean.count('{') > clean.count('}'):
+            clean += '}' * (clean.count('{') - clean.count('}'))
 
-        # Log the response for debugging purposes
-        print(f"AI Response: {response}")
+        try:
+            payload = json.loads(clean)
+            question = payload.get("question", "").strip()
+            answer = payload.get("answer", "").strip()
+            logger.info("Parsed question: %r", question)
+            return {"question": question, "answer": answer}
+        except json.JSONDecodeError as e:
+            logger.error("JSON parse error: %s", e)
 
-        # Parse the response to extract the question and answer
-        question_text = ""
-        answer_text = ""
-
-        if "Question:" in response and "Answer:" in response:
-            # Split at "Question:" and "Answer:"
-            question_part = response.split("Question:")[1].strip()
-            if "Answer:" in question_part:
-                question_text, answer_text = question_part.split("Answer:", 1)
-                question_text = question_text.strip()
-                answer_text = answer_text.strip()
-
-        # If parsing fails, fallback to a default question format
-        if not question_text or not answer_text:
-            question_text = f"What is an advanced concept in {subject}?"
-            answer_text = "A nuanced explanation of the topic."
-
-        # Return the formatted question and answer
-        return {
-            "question": f"🔎 **Skill Check**: {question_text}",
-            "answer": answer_text
-        }
+        # Fallback to a dynamic question
+        fallback_q = f"What is an advanced concept in {subject}?"
+        fallback_a = f"A detailed explanation of an advanced concept in {subject}."
+        logger.info("Using fallback question for subject '%s'", subject)
+        return {"question": fallback_q, "answer": fallback_a}
 
     @staticmethod
     def evaluate(user_answer: str, correct_answer: str) -> bool:
-        """Evaluate user answer (case-insensitive match)."""
-        user = user_answer.strip().lower()
-        correct = correct_answer.strip().lower()
+        """Case-insensitive, punctuation-insensitive compare (or keyword-based for fallback answers)."""
+        # strip punctuation and lowercase
+        normalize = lambda s: re.sub(r"[^\w\s]", "", s.lower()).strip()
 
-        # If the answer is AI-generated and we have a fallback question, we can check for relevance
-        if correct.startswith("A nuanced explanation of"):
-            # We only want answers that are somewhat related to the subject, not just any answer
-            keywords = correct_answer.split(" ")
-            # Check if the user answer contains relevant keywords
-            if all(keyword in user for keyword in keywords):
-                return True
-            return False
+        user = normalize(user_answer)
+        correct = normalize(correct_answer)
 
-        # Strict matching for factual questions
+        # Specialized fallback logic
+        if correct.startswith("a detailed explanation"):
+            # pick first few keywords to check relevance
+            keywords = correct.split()[:3]
+            return all(k in user for k in keywords)
+
         return user == correct
