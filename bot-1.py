@@ -24,12 +24,17 @@ if __name__ == '__main__':
     # configure the model provider (OpenAI, Ollama, etc)
     provider = None
     if URL:
-        provider = ModelProvider(type=TYPE, base_url=URL, api_key=API_KEY, model=MODEL)
+        provider = ModelProvider(
+            type=TYPE,
+            base_url=URL,
+            api_key=API_KEY,
+            model=MODEL
+        )
 
     # instantiate your engine and inject the provider
-    engine = SimpleEngine(id='bot-1')
-    engine.model_provider = provider
-    # you can remove the CSV‐loading line tomorrow once you rip out the rules:
+    engine = SimpleEngine(id='bot-1', model_provider=provider)
+
+    # you can remove CSV loading once you rip out the rules
     engine.load('rules/bot-rules-1.csv')
 
     # start the Discord bot
