@@ -1,0 +1,479 @@
+diff --git a/bot-1.py b/bot-1.py
+index 5760bc2..cfc63d5 100644
+--- a/bot-1.py
++++ b/bot-1.py
+@@ -1,59 +1,158 @@
+-## bot-1.py :: Kick off a chat-only Ollama Discord bot
++## bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats
+ ##
+ 
+-import owlmind.pipeline as _p
+-if hasattr(_p, 'BotPipeline'):    # or whatever class you found
+-    # override the method that does the fallback:
+-    orig = _p.BotPipeline.process
+-    def patched(self, ctx):
+-        # clear any lingering defaults
+-        if hasattr(ctx, 'response') and isinstance(ctx.response, str) and ctx.response.startswith("#### DEFAULT"):
+-            ctx.response = None
+-        return orig(self, ctx)
+-    _p.BotPipeline.process = patched
+-
++import os
++import re
++import datetime
+ from dotenv import dotenv_values
++import discord
++
+ from owlmind.pipeline import ModelProvider
+ from owlmind.simple import SimpleEngine
+ from owlmind.discord import DiscordBot
++from owlmind.bot import BotMessage
++
++from user_store import get_or_create_user, save_user
+ 
+-class CleanEngine(SimpleEngine):
++class PersistingBot(DiscordBot):
+     """
+-    A SimpleEngine override that retains /help, /info, /reload
+-    but bypasses OwlMind’s legacy rule fallback for all other messages.
++    Extends OwlMind’s DiscordBot to:
++     • Handle /start & /stats before AI
++     • Load/store user state in DynamoDB
+     """
+-    def process(self, context):
+-        msg = context['message'].strip()
+-
+-        # Handle built-in commands via the parent implementation
+-        if msg in ('/help', '/info', '/reload'):
+-            return super().process(context)
+-
+-        # Otherwise, skip any rule-engine default and call the LLM directly
+-        if self.model_provider:
+-            context.response = self.model_provider.request(msg)
+-        else:
+-            context.response = None
+-
+-if __name__ == '__main__':
+-    config = dotenv_values('.env')
+-    TOKEN = config.get('DISCORD_TOKEN')
+-    URL   = config.get('SERVER_URL')
+-    TYPE  = config.get('SERVER_TYPE')
+-    MODEL = config.get('SERVER_MODEL')
+-
+-    # make sure these loaded
++    async def on_message(self, message):
++        # 1) Ignore the bot itself, or non-mentions if not promiscuous
++        if message.author == self.user or (
++            not self.promiscuous and
++            not (self.user in message.mentions or isinstance(message.channel, discord.DMChannel))
++        ):
++            return
++
++        # 2) Strip out <@…> mentions
++        text = re.sub(r"<@\d+>", "", message.content).strip()
++        if not text:
++            return
++
++        # 3) /start: allocate SPECIAL for brand-new users
++        if text.lower().startswith("/start"):
++            uid  = str(message.author.id)
++            user = get_or_create_user(uid)
++            # only allow if XP==0
++            if user.get("XP", 0) != 0:
++                return await message.channel.send("You’ve already set up your SPECIAL stats.")
++            return await message.channel.send(
++                "Welcome to VaultDwellersBot! You have **28** points to assign across your SPECIAL stats.\n"
++                "Reply with 7 comma-separated integers (must sum to 28) in order:\n"
++                "`Strength, Perception, Endurance, Charisma, Intelligence, Agility, Luck`\n"
++                "Example: `5,5,5,5,5,2,1`"
++            )
++
++        # 4) Handle the user’s allocation reply
++        if re.fullmatch(r"\d+(,\s*\d+){6}", text):
++            parts = [int(x) for x in text.split(",")]
++            if sum(parts) != 28:
++                return await message.channel.send("❌ That doesn’t sum to 28—try again.")
++            stats = dict(zip(
++                ["Strength","Perception","Endurance","Charisma","Intelligence","Agility","Luck"],
++                parts
++            ))
++            uid  = str(message.author.id)
++            user = get_or_create_user(uid)
++            user["SPECIAL"] = stats
++            save_user(user)
++            return await message.channel.send(f"SPECIAL set to {stats}!\nYou can now send `/stats` or just chat.")
++
++        # 5) /stats: show profile
++        if text.lower().strip() == "/stats":
++            uid  = str(message.author.id)
++            user = get_or_create_user(uid)
++            xp    = user.get("XP", 0)
++            level = user.get("Level", 1)
++            stats = user.get("SPECIAL", {})
++            perks = user.get("Perks", [])
++            reply = (
++                f"**Vault Dweller Profile**\n"
++                f"• XP: {xp}   Level: {level}\n"
++                f"• SPECIAL:\n"
++                + "\n".join(f"  – {k}: {v}" for k,v in stats.items()) +
++                f"\n• Perks: {', '.join(perks) or 'None'}"
++            )
++            return await message.channel.send(reply)
++
++        # 6) Load/create user record & bump XP
++        uid  = str(message.author.id)
++        user = get_or_create_user(uid)
++        user['XP'] = user.get('XP', 0) + 1
++
++        # 7) Build OwlMind context
++        context = BotMessage(
++            layer1       = message.guild.id        if message.guild else 0,
++            layer2       = message.channel.id      if hasattr(message.channel, 'id') else 0,
++            layer3       = message.channel.id      if isinstance(message.channel, discord.Thread) else 0,
++            layer4       = message.author.id,
++            server_name  = message.guild.name      if message.guild else '#dm',
++            channel_name = message.channel.name    if hasattr(message.channel, 'name') else '#dm',
++            thread_name  = message.channel.name    if isinstance(message.channel, discord.Thread) else '',
++            author_name     = message.author.name,
++            author_fullname = message.author.global_name,
++            author          = message.author.global_name,
++            bot             = self.user,
++            timestamp       = datetime.datetime.now(),
++            date            = datetime.datetime.now().strftime("%d-%b-%Y"),
++            time            = datetime.datetime.now().strftime("%H:%M:%S"),
++            message         = text,
++            attachments     = [a.url for a in message.attachments],
++            reactions       = [str(r.emoji) for r in message.reactions]
++        )
++
++        # 8) Run through OwlMind engine
++        if self.engine:
++            self.engine.process(context)
++
++        # 9) If we got an AI response, record & save, then send
++        if context.response:
++            reply = str(context.response)
++
++            # record history
++            user.setdefault('History', []).append({
++                'when':   datetime.datetime.utcnow().isoformat(),
++                'prompt': text,
++                'reply':  reply
++            })
++
++            # example perk at 10 XP
++            if user['XP'] >= 10 and 'First 10 XP' not in user.get('Perks', []):
++                user.setdefault('Perks', []).append('First 10 XP')
++                reply = "🎉 You’ve unlocked the “First 10 XP” perk!\n\n" + reply
++
++            # persist update
++            save_user(user)
++
++            # chunk & send
++            max_len = 2000
++            for i in range(0, len(reply), max_len):
++                await message.channel.send(reply[i:i+max_len])
++
++if __name__ == "__main__":
++    # load env
++    cfg = dotenv_values('.env')
++    TOKEN = cfg.get('DISCORD_TOKEN')
++    URL   = cfg.get('SERVER_URL')
++    TYPE  = cfg.get('SERVER_TYPE')
++    MODEL = cfg.get('SERVER_MODEL')
++
+     print("→", TYPE, URL, MODEL)
+ 
++    # set up OwlMind
+     provider = ModelProvider(
+-        type=TYPE,
+-        base_url=URL,
+-        api_key=None,
+-        model=MODEL
++        type     = TYPE,
++        base_url = URL,
++        api_key  = cfg.get('SERVER_API_KEY'),
++        model    = MODEL
+     )
+-
+-    engine = CleanEngine(id='bot-1')
++    engine = SimpleEngine(id='bot-1')
+     engine.model_provider = provider
+ 
+-    bot = DiscordBot(token=TOKEN, engine=engine, debug=True)
++    # launch PersistingBot in non-promiscuous mode
++    bot = PersistingBot(token=TOKEN, engine=engine, promiscuous=False, debug=True)
+     bot.run()
+diff --git a/owlmind/bot.py b/owlmind/bot.py
+index 998e5ab..cfc63d5 100644
+--- a/owlmind/bot.py
++++ b/owlmind/bot.py
+@@ -1,79 +1,158 @@
++## bot-1.py :: VaultDwellersBot with OwlMind + DynamoDB + /start & /stats
+ ##
+-## OwlMind - Platform for Education and Experimentation with Hybrid Intelligent Systems
+-## bot.py :: Definitions for bot engine
+-## 
+-#  
+-# Copyright (c) 2024, The Generative Intelligence Lab @ FAU
+-# 
+-# Permission is hereby granted, free of charge, to any person obtaining a copy
+-# of this software and associated documentation files (the "Software"), to deal
+-# in the Software without restriction, including without limitation the rights 
+-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-# copies of the Software, and to permit persons to whom the Software is
+-# furnished to do so, subject to the following conditions:
+-#
+-# The above copyright notice and this permission notice shall be included in all
+-# copies or substantial portions of the Software.
+-# 
+-# Documentation and Getting Started:
+-#    https://github.com/genilab-fau/owlmind
+-#
+-#
+-# Disclaimer: 
+-# Generative AI has been used extensively while developing this package.
+-# 
+-
+-from .agent import Agent, Plan
+-from .context import Context
+ 
+-##
+-## BASE CLASS FOR BOT MESSAGE
+-## This is the class received through BotBrain.process()
++import os
++import re
++import datetime
++from dotenv import dotenv_values
++import discord
++
++from owlmind.pipeline import ModelProvider
++from owlmind.simple import SimpleEngine
++from owlmind.discord import DiscordBot
++from owlmind.bot import BotMessage
+ 
+-class BotMessage(Context):
+-    #BASE_STANDARD = '.;'
++from user_store import get_or_create_user, save_user
++
++class PersistingBot(DiscordBot):
+     """
+-    Message format being passed to/from BotBrain logic
++    Extends OwlMind’s DiscordBot to:
++     • Handle /start & /stats before AI
++     • Load/store user state in DynamoDB
+     """
+-    def __init__(self, **kwargs):
+-        
+-        # Load default fields and update with parameters
+-        default_fields = {
+-            'layer1': 0,               # Server ID (guild ID or 0 for DM)
+-            'layer2': 0,               # Channel ID (or 0 for DM)
+-            'layer3': 0,               # Thread ID (0 if no thread)
+-            'layer4': None,            # Author ID
+-            'server_name': '',         # Server name (or '#dm' for direct message)
+-            'channel_name': '',        # Channel name (or '#dm' for DM)
+-            'thread_name': '',         # Thread name (empty if no thread)
+-            'author_name': '',         # Author name (username)
+-            'author_fullname': '',     # Author full name (global_name)
+-            'message': '',             # Message content
+-            'attachments': None,       # Attachments in the message
+-            'reactions': None          # Reactions to the message
+-        }
+-
+-        default_fields.update(kwargs)
+-        
+-        # Initialize Context
+-        super().__init__(facts=default_fields)
+-        return 
++    async def on_message(self, message):
++        # 1) Ignore the bot itself, or non-mentions if not promiscuous
++        if message.author == self.user or (
++            not self.promiscuous and
++            not (self.user in message.mentions or isinstance(message.channel, discord.DMChannel))
++        ):
++            return
+ 
++        # 2) Strip out <@…> mentions
++        text = re.sub(r"<@\d+>", "", message.content).strip()
++        if not text:
++            return
+ 
+-##
+-## BASE CLASS FOR BOT ENGINE
+-##
++        # 3) /start: allocate SPECIAL for brand-new users
++        if text.lower().startswith("/start"):
++            uid  = str(message.author.id)
++            user = get_or_create_user(uid)
++            # only allow if XP==0
++            if user.get("XP", 0) != 0:
++                return await message.channel.send("You’ve already set up your SPECIAL stats.")
++            return await message.channel.send(
++                "Welcome to VaultDwellersBot! You have **28** points to assign across your SPECIAL stats.\n"
++                "Reply with 7 comma-separated integers (must sum to 28) in order:\n"
++                "`Strength, Perception, Endurance, Charisma, Intelligence, Agility, Luck`\n"
++                "Example: `5,5,5,5,5,2,1`"
++            )
+ 
+-class BotEngine(Agent):
+-    """
+-    BotBrain logic
+-    """  
+-    def __init__(self, id):
+-        self.debug = False
+-        self.announcement = None
+-        super().__init__(id)
++        # 4) Handle the user’s allocation reply
++        if re.fullmatch(r"\d+(,\s*\d+){6}", text):
++            parts = [int(x) for x in text.split(",")]
++            if sum(parts) != 28:
++                return await message.channel.send("❌ That doesn’t sum to 28—try again.")
++            stats = dict(zip(
++                ["Strength","Perception","Endurance","Charisma","Intelligence","Agility","Luck"],
++                parts
++            ))
++            uid  = str(message.author.id)
++            user = get_or_create_user(uid)
++            user["SPECIAL"] = stats
++            save_user(user)
++            return await message.channel.send(f"SPECIAL set to {stats}!\nYou can now send `/stats` or just chat.")
++
++        # 5) /stats: show profile
++        if text.lower().strip() == "/stats":
++            uid  = str(message.author.id)
++            user = get_or_create_user(uid)
++            xp    = user.get("XP", 0)
++            level = user.get("Level", 1)
++            stats = user.get("SPECIAL", {})
++            perks = user.get("Perks", [])
++            reply = (
++                f"**Vault Dweller Profile**\n"
++                f"• XP: {xp}   Level: {level}\n"
++                f"• SPECIAL:\n"
++                + "\n".join(f"  – {k}: {v}" for k,v in stats.items()) +
++                f"\n• Perks: {', '.join(perks) or 'None'}"
++            )
++            return await message.channel.send(reply)
++
++        # 6) Load/create user record & bump XP
++        uid  = str(message.author.id)
++        user = get_or_create_user(uid)
++        user['XP'] = user.get('XP', 0) + 1
++
++        # 7) Build OwlMind context
++        context = BotMessage(
++            layer1       = message.guild.id        if message.guild else 0,
++            layer2       = message.channel.id      if hasattr(message.channel, 'id') else 0,
++            layer3       = message.channel.id      if isinstance(message.channel, discord.Thread) else 0,
++            layer4       = message.author.id,
++            server_name  = message.guild.name      if message.guild else '#dm',
++            channel_name = message.channel.name    if hasattr(message.channel, 'name') else '#dm',
++            thread_name  = message.channel.name    if isinstance(message.channel, discord.Thread) else '',
++            author_name     = message.author.name,
++            author_fullname = message.author.global_name,
++            author          = message.author.global_name,
++            bot             = self.user,
++            timestamp       = datetime.datetime.now(),
++            date            = datetime.datetime.now().strftime("%d-%b-%Y"),
++            time            = datetime.datetime.now().strftime("%H:%M:%S"),
++            message         = text,
++            attachments     = [a.url for a in message.attachments],
++            reactions       = [str(r.emoji) for r in message.reactions]
++        )
++
++        # 8) Run through OwlMind engine
++        if self.engine:
++            self.engine.process(context)
++
++        # 9) If we got an AI response, record & save, then send
++        if context.response:
++            reply = str(context.response)
++
++            # record history
++            user.setdefault('History', []).append({
++                'when':   datetime.datetime.utcnow().isoformat(),
++                'prompt': text,
++                'reply':  reply
++            })
++
++            # example perk at 10 XP
++            if user['XP'] >= 10 and 'First 10 XP' not in user.get('Perks', []):
++                user.setdefault('Perks', []).append('First 10 XP')
++                reply = "🎉 You’ve unlocked the “First 10 XP” perk!\n\n" + reply
++
++            # persist update
++            save_user(user)
++
++            # chunk & send
++            max_len = 2000
++            for i in range(0, len(reply), max_len):
++                await message.channel.send(reply[i:i+max_len])
++
++if __name__ == "__main__":
++    # load env
++    cfg = dotenv_values('.env')
++    TOKEN = cfg.get('DISCORD_TOKEN')
++    URL   = cfg.get('SERVER_URL')
++    TYPE  = cfg.get('SERVER_TYPE')
++    MODEL = cfg.get('SERVER_MODEL')
+ 
+-    def process(self, context:BotMessage):
+-        super().process(context=context)
++    print("→", TYPE, URL, MODEL)
+ 
++    # set up OwlMind
++    provider = ModelProvider(
++        type     = TYPE,
++        base_url = URL,
++        api_key  = cfg.get('SERVER_API_KEY'),
++        model    = MODEL
++    )
++    engine = SimpleEngine(id='bot-1')
++    engine.model_provider = provider
+ 
++    # launch PersistingBot in non-promiscuous mode
++    bot = PersistingBot(token=TOKEN, engine=engine, promiscuous=False, debug=True)
++    bot.run()
+diff --git a/user_store.py b/user_store.py
+new file mode 100644
+index 0000000..ef7e92b
+--- /dev/null
++++ b/user_store.py
+@@ -0,0 +1,36 @@
++# user_store.py
++
++import os
++import boto3
++
++ddb   = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION'))
++table = ddb.Table('VaultUsers')
++
++def get_or_create_user(discord_id: str) -> dict:
++    """Fetch the user record, or create a new one if missing."""
++    resp = table.get_item(Key={'discordUserID': discord_id})
++    if 'Item' in resp:
++        return resp['Item']
++    # initialize a brand-new user
++    item = {
++        'discordUserID': discord_id,
++        'XP': 0,
++        'Level': 1,
++        'SPECIAL': {
++            'Strength': 0,
++            'Perception': 0,
++            'Endurance': 0,
++            'Charisma': 0,
++            'Intelligence': 0,
++            'Agility': 0,
++            'Luck': 0
++        },
++        'Perks': [],
++        'History': []
++    }
++    table.put_item(Item=item)
++    return item
++
++def save_user(item: dict):
++    """Persist the entire user record back to DynamoDB."""
++    table.put_item(Item=item)

@@ -1,3 +1,5 @@
+# owlmind/pipeline.py
+
 import requests
 import time
 from urllib.parse import urljoin
@@ -20,7 +22,6 @@ class ModelRequestMaker:
 # --- Ollama ---
 class OllamaRequest(ModelRequestMaker):
     def url_models(self, base_url):
-        # Ollama’s tag endpoint
         return urljoin(base_url, "/api/tags")
 
     def url_chat(self, base_url):
@@ -120,7 +121,9 @@ class ModelProvider:
     def models(self):
         url  = self.req_maker.url_models(self.base_url)
         resp = self._call(url, None)
-        return resp.json() if resp.status_code == 200 else resp.text
+        if resp.status_code == 200:
+            return resp.json()
+        return resp.text
 
     def request(self, prompt, **kwargs):
         url     = self.req_maker.url_chat(self.base_url)

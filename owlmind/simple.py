@@ -1,8 +1,10 @@
+# owlmind/simple.py
+
 from .bot import BotEngine, BotMessage
 
 class SimpleEngine(BotEngine):
     """
-    Chat-only engine: honors /help, /info, /reload, 
+    Chat-only engine: honors /help, /info, /reload,
     otherwise shunts the text straight to your ModelProvider.
     """
     VERSION = "1.2"
@@ -40,11 +42,8 @@ class SimpleEngine(BotEngine):
             )
 
         else:
-            # everything else goes to your Llama server
             if self.model_provider:
-                print(f"[AI DEBUG] → POST to: {self.model_provider.req_maker.url_chat(self.model_provider.base_url)}")
-                print(f"[AI DEBUG] → payload: {{'model':'{self.model_provider.model}','prompt':'{msg}'}}")
+                # forward everything else to the Llama server (or OpenAI, etc)
                 context.response = self.model_provider.request(msg)
-                print(f"[AI DEBUG] ← {self.model_provider.delta}s")
             else:
                 context.response = "!!ERROR!! No model provider configured"
