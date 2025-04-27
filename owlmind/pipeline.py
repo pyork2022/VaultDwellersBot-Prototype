@@ -1,29 +1,27 @@
 import requests
-import json
-from urllib.parse import urljoin
 import time
+from urllib.parse import urljoin
 
-# --- Request Maker Base ---
+
 class ModelRequestMaker:
-    def url_models(self, base_url):
-        raise NotImplementedError("url_models() must be overridden")
+    def url_models(self, base_url: str) -> str:
+        raise NotImplementedError
 
-    def url_chat(self, base_url):
-        raise NotImplementedError("url_chat() must be overridden")
-    
-    def package(self, model, prompt, **kwargs):
-        raise NotImplementedError("package() must be overridden")
+    def url_chat(self, base_url: str) -> str:
+        raise NotImplementedError
 
-    def unpackage(self, response):
-        raise NotImplementedError("unpackage() must be overridden")
+    def package(self, model: str, prompt: str, **kwargs) -> dict:
+        raise NotImplementedError
+
+    def unpackage(self, response: dict) -> str:
+        raise NotImplementedError
 
 
-# --- Ollama ---
 class OllamaRequest(ModelRequestMaker):
-    def url_chat(self, base_url):
-        return urljoin(base_url, '/api/generate')
-    
-    def package(self, model, prompt, **kwargs):
+    def url_chat(self, base_url: str) -> str:
+        return urljoin(base_url.rstrip('/'), '/api/generate')
+
+    def package(self, model: str, prompt: str, **kwargs) -> dict:
         payload = {
             "model": model,
             "prompt": prompt,
@@ -32,62 +30,53 @@ class OllamaRequest(ModelRequestMaker):
         if kwargs:
             payload["options"] = kwargs
         return payload
-    
-    def unpackage(self, response):
-        return response.get('response')
+
+    def unpackage(self, response: dict) -> str:
+        return response.get('response', None)
 
 
-# --- OpenWebUI ---
 class OpenWebUIRequest(ModelRequestMaker):
-    def url_chat(self, base_url):
-        return urljoin(base_url, '/api/chat/completions')
-    
-    def package(self, model, prompt, **kwargs):
-        messages = [{"role": "user", "content": prompt}]
-        payload = {
+    def url_chat(self, base_url: str) -> str:
+        return urljoin(base_url.rstrip('/'), '/api/chat/completions')
+
+    def package(self, model: str, prompt: str, **kwargs) -> dict:
+        return {
             "model": model,
-            "messages": messages
-        }
-        # e.g. include temperature, max_tokens in kwargs
-        payload.update(kwargs)
-        return payload
-    
-    def unpackage(self, response):
-        choices = response.get('choices', [])
-        if choices:
-            return choices[0].get('message', {}).get('content')
-        return None
-
-
-# --- OpenAI (official API) ---
-class OpenAIRequest(ModelRequestMaker):
-    def url_models(self, base_url):
-        return urljoin(base_url, '/models')
-
-    def url_chat(self, base_url):
-        return urljoin(base_url, '/chat/completions')
-    
-    def package(self, model, prompt, **kwargs):
-        # conform to OpenAI chat endpoint
-        messages = [{"role": "user", "content": prompt}]
-        payload = {
-            "model": model,
-            "messages": messages,
+            "messages": [{"role": "user", "content": prompt}],
             **kwargs
         }
-        return payload
-    
-    def unpackage(self, response):
+
+    def unpackage(self, response: dict) -> str:
         choices = response.get('choices', [])
         if choices:
             return choices[0].get('message', {}).get('content')
         return None
 
 
-# --- ModelProvider ---
+class OpenAIRequest(ModelRequestMaker):
+    def url_models(self, base_url: str) -> str:
+        return urljoin(base_url.rstrip('/'), '/models')
+
+    def url_chat(self, base_url: str) -> str:
+        return urljoin(base_url.rstrip('/'), '/chat/completions')
+
+    def package(self, model: str, prompt: str, **kwargs) -> dict:
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            **kwargs
+        }
+
+    def unpackage(self, response: dict) -> str:
+        choices = response.get('choices', [])
+        if choices:
+            return choices[0].get('message', {}).get('content')
+        return None
+
+
 class ModelProvider:
-    def __init__(self, base_url, type=None, api_key=None, model=None):
-        self.base_url = base_url.rstrip('/')
+    def __init__(self, base_url: str, type: str = None, api_key: str = None, model: str = None):
+        self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.delta = -1
@@ -100,46 +89,44 @@ class ModelProvider:
         elif type == 'openai':
             self.req_maker = OpenAIRequest()
         else:
-            self.req_maker = None
-        
-        if self.req_maker:
-            self.type = type
-        else:
             raise ValueError(f"Unsupported MODEL_PROVIDER type: {type}")
 
-    def _call(self, url, payload=None):
+    def _call(self, url: str, payload: dict = None) -> requests.Response:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        
-        try:
-            start = time.time()
-            resp = requests.post(url, json=payload, headers=headers)
-            self.delta = round(time.time() - start, 3)
-            return resp
-        except Exception as e:
-            self.delta = -1
-            raise RuntimeError(f"Request to {url} failed: {e}")
+
+        start = time.time()
+        resp = requests.post(url, json=payload, headers=headers)
+        self.delta = round(time.time() - start, 3)
+        return resp
 
     def models(self):
-        if not self.req_maker:
-            raise RuntimeError("No request maker configured")
         url = self.req_maker.url_models(self.base_url)
-        resp = self._call(url, None)
+        resp = self._call(url)
         return resp.json() if resp.status_code == 200 else resp.text
 
-    def request(self, prompt, **kwargs):
-        if not self.req_maker:
-            return "!!ERROR!! No model provider configured"
-
+    def request(self, prompt: str, **kwargs) -> str:
         url = self.req_maker.url_chat(self.base_url)
         payload = self.req_maker.package(self.model, prompt, **kwargs)
-        
         resp = self._call(url, payload)
+
         if resp.status_code == 200:
             data = resp.json()
             return self.req_maker.unpackage(data)
-        elif resp.status_code == 401:
+        if resp.status_code == 401:
             return "!!ERROR!! Authentication failed (check your API key)"
-        else:
-            return f"!!ERROR!! HTTP {resp.status_code}: {resp.text}"
+        return f"!!ERROR!! HTTP {resp.status_code}: {resp.text}"
+
+
+# --- DEBUG / quick test ---
+if __name__ == '__main__':
+    from dotenv import dotenv_values
+    cfg = dotenv_values('.env')
+    prov = ModelProvider(
+        base_url=cfg['SERVER_URL'],
+        type=cfg['SERVER_TYPE'],
+        api_key=cfg['SERVER_API_KEY'],
+        model=cfg['SERVER_MODEL']
+    )
+    print(prov.request("1+1"))
