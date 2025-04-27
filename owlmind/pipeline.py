@@ -59,30 +59,35 @@ class OpenWebUIRequest(ModelRequestMaker):
             return choices[0].get('message', {}).get('content')
         return None
 
-
-# --- OpenAI (official API) ---
+# --- OpenAI ---
 class OpenAIRequest(ModelRequestMaker):
     def url_models(self, base_url):
-        return f"{base_url}/models"
+        # guarantee the /v1 prefix
+        prefix = base_url.rstrip('/')
+        if not prefix.endswith('/v1'):
+            prefix += '/v1'
+        return f"{prefix}/models"
 
     def url_chat(self, base_url):
-        return f"{base_url}/chat/completions"
-    
+        # guarantee the /v1 prefix
+        prefix = base_url.rstrip('/')
+        if not prefix.endswith('/v1'):
+            prefix += '/v1'
+        return f"{prefix}/chat/completions"
+
     def package(self, model, prompt, **kwargs):
-        # conform to OpenAI chat endpoint
-        messages = [{"role": "user", "content": prompt}]
-        payload = {
+        return {
             "model": model,
-            "messages": messages,
+            "messages": [{"role": "user", "content": prompt}],
             **kwargs
         }
-        return payload
-    
+
     def unpackage(self, response):
-        choices = response.get('choices', [])
+        choices = response.get("choices", [])
         if choices:
-            return choices[0].get('message', {}).get('content')
+            return choices[0].get("message", {}).get("content")
         return None
+
 
 
 # --- ModelProvider with debug prints ---
