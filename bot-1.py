@@ -1,6 +1,17 @@
 ## bot-1.py :: Kick off a chat-only Ollama Discord bot
 ##
 
+import owlmind.pipeline as _p
+if hasattr(_p, 'BotPipeline'):    # or whatever class you found
+    # override the method that does the fallback:
+    orig = _p.BotPipeline.process
+    def patched(self, ctx):
+        # clear any lingering defaults
+        if hasattr(ctx, 'response') and isinstance(ctx.response, str) and ctx.response.startswith("#### DEFAULT"):
+            ctx.response = None
+        return orig(self, ctx)
+    _p.BotPipeline.process = patched
+
 from dotenv import dotenv_values
 from owlmind.pipeline import ModelProvider
 from owlmind.simple import SimpleEngine
