@@ -1,4 +1,4 @@
-# VaultDwellersBot - Project Prototype README
+# VaultDwellersBot - Project Prototype README (Built with Owlmind)
 
 ### Overview
 VaultDwellersBot is a Fallout-themed, Discord-based interactive educational bot that provides users with a dynamic study experience, gamified through an adventure and SPECIAL stats system. The project combines AI-powered quiz generation with character progression, XP leveling, perks, and Fallout-style narrative.
